@@ -1,0 +1,9 @@
+name: require_tenant
+phase: before_model
+
+if:
+  missing_header: x-garden-tenant
+
+then:
+  effect: deny
+  reason: "Tenant header is required."

@@ -1,0 +1,7 @@
+target
+.git
+.agents
+.codex
+*.db
+*.sqlite
+.env
