@@ -19,7 +19,7 @@ impl OpenAiCompatibleClient {
     pub async fn chat_completions(
         &self,
         authorization: HeaderValue,
-        body: Value,
+        body: &Value,
     ) -> Result<ProviderJsonResponse, ProviderError> {
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, authorization);
@@ -28,7 +28,7 @@ impl OpenAiCompatibleClient {
             .http
             .post(format!("{}/v1/chat/completions", self.base_url))
             .headers(headers)
-            .json(&body)
+            .json(body)
             .send()
             .await
             .map_err(ProviderError::request)?;
@@ -97,7 +97,7 @@ mod tests {
         let response = client
             .chat_completions(
                 "Bearer sk-pass-through".parse().unwrap(),
-                json!({
+                &json!({
                     "model": "gpt-4.1-mini",
                     "messages": [{ "role": "user", "content": "hello" }]
                 }),

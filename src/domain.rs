@@ -62,3 +62,39 @@ pub enum ContentPart {
     InputAudio { input_audio: Value },
     Other(Value),
 }
+
+impl RelayRequest {
+    pub fn input_text(&self) -> String {
+        self.messages
+            .iter()
+            .map(|message| message.content.text())
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub fn estimated_input_tokens(&self) -> usize {
+        estimate_tokens(&self.input_text())
+    }
+}
+
+impl MessageContent {
+    pub fn text(&self) -> String {
+        match self {
+            Self::Text(text) => text.clone(),
+            Self::Parts(parts) => parts
+                .iter()
+                .filter_map(|part| match part {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Self::Empty => String::new(),
+        }
+    }
+}
+
+fn estimate_tokens(text: &str) -> usize {
+    text.split_whitespace().count()
+}

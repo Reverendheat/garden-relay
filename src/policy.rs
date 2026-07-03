@@ -6,6 +6,7 @@ use std::{
 
 use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::domain::RelayRequest;
 
@@ -96,6 +97,8 @@ impl PolicyEngine {
 pub struct PolicyContext<'a> {
     pub headers: &'a HeaderMap,
     pub request: &'a RelayRequest,
+    pub request_body: &'a Value,
+    pub response_body: Option<&'a Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -128,6 +131,8 @@ pub enum PolicyEffect {
 pub enum PolicyPhase {
     BeforeInput,
     BeforeModel,
+    AfterModel,
+    BeforeResponse,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -174,12 +179,34 @@ impl StaticPolicy {
 pub struct StaticCondition {
     pub always: Option<bool>,
     pub missing_header: Option<String>,
+    pub header_equals: Option<HeaderEqualsCondition>,
     pub model: Option<String>,
+    pub tenant_id: Option<String>,
+    pub app_id: Option<String>,
+    pub user_id: Option<String>,
+    pub input_contains: Option<String>,
+    pub request_json_equals: Option<JsonEqualsCondition>,
+    pub response_contains: Option<String>,
+    pub response_json_equals: Option<JsonEqualsCondition>,
+    pub estimated_input_tokens_greater_than: Option<usize>,
+    pub tool_name: Option<String>,
 }
 
 impl StaticCondition {
     fn has_any_condition(&self) -> bool {
-        self.always.is_some() || self.missing_header.is_some() || self.model.is_some()
+        self.always.is_some()
+            || self.missing_header.is_some()
+            || self.header_equals.is_some()
+            || self.model.is_some()
+            || self.tenant_id.is_some()
+            || self.app_id.is_some()
+            || self.user_id.is_some()
+            || self.input_contains.is_some()
+            || self.request_json_equals.is_some()
+            || self.response_contains.is_some()
+            || self.response_json_equals.is_some()
+            || self.estimated_input_tokens_greater_than.is_some()
+            || self.tool_name.is_some()
     }
 
     fn matches(&self, ctx: &PolicyContext<'_>) -> bool {
@@ -197,13 +224,104 @@ impl StaticCondition {
             return false;
         }
 
+        if let Some(header_equals) = &self.header_equals
+            && !header_equals.matches(ctx.headers)
+        {
+            return false;
+        }
+
         if let Some(model) = &self.model
             && ctx.request.model != *model
         {
             return false;
         }
 
+        if let Some(tenant_id) = &self.tenant_id
+            && ctx.request.metadata.tenant_id.as_deref() != Some(tenant_id)
+        {
+            return false;
+        }
+
+        if let Some(app_id) = &self.app_id
+            && ctx.request.metadata.app_id.as_deref() != Some(app_id)
+        {
+            return false;
+        }
+
+        if let Some(user_id) = &self.user_id
+            && ctx.request.metadata.user_id.as_deref() != Some(user_id)
+        {
+            return false;
+        }
+
+        if let Some(needle) = &self.input_contains
+            && !ctx.request.input_text().contains(needle)
+        {
+            return false;
+        }
+
+        if let Some(json_equals) = &self.request_json_equals
+            && !json_equals.matches(ctx.request_body)
+        {
+            return false;
+        }
+
+        if let Some(needle) = &self.response_contains
+            && !ctx
+                .response_body
+                .is_some_and(|response| json_contains_text(response, needle))
+        {
+            return false;
+        }
+
+        if let Some(json_equals) = &self.response_json_equals
+            && !ctx
+                .response_body
+                .is_some_and(|response| json_equals.matches(response))
+        {
+            return false;
+        }
+
+        if let Some(threshold) = self.estimated_input_tokens_greater_than
+            && ctx.request.estimated_input_tokens() <= threshold
+        {
+            return false;
+        }
+
+        if let Some(tool_name) = &self.tool_name
+            && !request_has_tool_name(ctx.request_body, tool_name)
+        {
+            return false;
+        }
+
         true
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HeaderEqualsCondition {
+    pub name: String,
+    pub value: String,
+}
+
+impl HeaderEqualsCondition {
+    fn matches(&self, headers: &HeaderMap) -> bool {
+        headers
+            .get(&self.name)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value == self.value)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct JsonEqualsCondition {
+    pub pointer: String,
+    pub value: Value,
+}
+
+impl JsonEqualsCondition {
+    fn matches(&self, value: &Value) -> bool {
+        value.pointer(&self.pointer) == Some(&self.value)
     }
 }
 
@@ -238,9 +356,33 @@ fn is_yaml_file(path: &Path) -> bool {
         .is_some_and(|extension| matches!(extension, "yaml" | "yml"))
 }
 
+fn json_contains_text(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::String(text) => text.contains(needle),
+        Value::Array(values) => values.iter().any(|value| json_contains_text(value, needle)),
+        Value::Object(values) => values
+            .values()
+            .any(|value| json_contains_text(value, needle)),
+        _ => false,
+    }
+}
+
+fn request_has_tool_name(body: &Value, name: &str) -> bool {
+    body.get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| {
+            tools.iter().any(|tool| {
+                tool.pointer("/function/name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|tool_name| tool_name == name)
+            })
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use axum::http::HeaderMap;
+    use serde_json::json;
 
     use crate::domain::{
         Message, MessageContent, MessageRole, RelayOperation, RelayOptions, RequestMetadata,
@@ -268,6 +410,8 @@ mod tests {
         let ctx = PolicyContext {
             headers: &headers,
             request: &request,
+            request_body: &json!({ "model": "gpt-4.1-mini" }),
+            response_body: None,
         };
 
         let decisions = engine.evaluate(PolicyPhase::BeforeModel, &ctx);
@@ -298,6 +442,8 @@ mod tests {
         let ctx = PolicyContext {
             headers: &headers,
             request: &request,
+            request_body: &json!({ "model": "gpt-4.1-mini" }),
+            response_body: None,
         };
 
         let decisions = engine.evaluate(PolicyPhase::BeforeModel, &ctx);
@@ -336,6 +482,110 @@ mod tests {
         let policies = engine.list_policies();
         assert_eq!(policies.len(), 1);
         assert_eq!(policies[0].action.reason.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn matches_header_tenant_input_request_json_tokens_and_tool() {
+        let policy = StaticPolicy {
+            name: "compound".to_owned(),
+            phase: PolicyPhase::BeforeInput,
+            condition: StaticCondition {
+                header_equals: Some(HeaderEqualsCondition {
+                    name: "x-garden-app".to_owned(),
+                    value: "support_bot".to_owned(),
+                }),
+                tenant_id: Some("tenant_123".to_owned()),
+                app_id: Some("support_bot".to_owned()),
+                user_id: Some("user_456".to_owned()),
+                input_contains: Some("secret".to_owned()),
+                request_json_equals: Some(JsonEqualsCondition {
+                    pointer: "/metadata/risk".to_owned(),
+                    value: json!("high"),
+                }),
+                estimated_input_tokens_greater_than: Some(1),
+                tool_name: Some("delete_file".to_owned()),
+                ..StaticCondition::default()
+            },
+            action: StaticAction {
+                effect: StaticEffectKind::Deny,
+                reason: None,
+            },
+        };
+        let engine = PolicyEngine::from_policies(vec![policy]);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-garden-app", "support_bot".parse().unwrap());
+        headers.insert("x-garden-tenant", "tenant_123".parse().unwrap());
+        headers.insert("x-garden-user", "user_456".parse().unwrap());
+        let request_body = json!({
+            "metadata": { "risk": "high" },
+            "tools": [{
+                "type": "function",
+                "function": { "name": "delete_file" }
+            }]
+        });
+        let request = RelayRequest {
+            metadata: RequestMetadata {
+                tenant_id: Some("tenant_123".to_owned()),
+                app_id: Some("support_bot".to_owned()),
+                user_id: Some("user_456".to_owned()),
+                provider_metadata: None,
+            },
+            messages: vec![Message {
+                role: MessageRole::User,
+                content: MessageContent::Text("contains secret".to_owned()),
+            }],
+            ..relay_request()
+        };
+        let ctx = PolicyContext {
+            headers: &headers,
+            request: &request,
+            request_body: &request_body,
+            response_body: None,
+        };
+
+        let decisions = engine.evaluate(PolicyPhase::BeforeInput, &ctx);
+
+        assert!(decisions[0].matched);
+    }
+
+    #[test]
+    fn matches_response_content_and_json() {
+        let policy = StaticPolicy {
+            name: "block_response".to_owned(),
+            phase: PolicyPhase::AfterModel,
+            condition: StaticCondition {
+                response_contains: Some("unsupported claim".to_owned()),
+                response_json_equals: Some(JsonEqualsCondition {
+                    pointer: "/choices/0/finish_reason".to_owned(),
+                    value: json!("stop"),
+                }),
+                ..StaticCondition::default()
+            },
+            action: StaticAction {
+                effect: StaticEffectKind::Deny,
+                reason: None,
+            },
+        };
+        let engine = PolicyEngine::from_policies(vec![policy]);
+        let headers = HeaderMap::new();
+        let request = relay_request();
+        let request_body = json!({});
+        let response_body = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": { "content": "unsupported claim" }
+            }]
+        });
+        let ctx = PolicyContext {
+            headers: &headers,
+            request: &request,
+            request_body: &request_body,
+            response_body: Some(&response_body),
+        };
+
+        let decisions = engine.evaluate(PolicyPhase::AfterModel, &ctx);
+
+        assert!(decisions[0].matched);
     }
 
     fn relay_request() -> RelayRequest {

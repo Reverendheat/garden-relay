@@ -87,6 +87,8 @@ pub async fn chat_completions(
         PolicyPhase::BeforeInput,
         &headers,
         &relay_request,
+        &body,
+        None,
     )
     .map_err(|error| fail_lifecycle(&state, &mut lifecycle, error))?;
 
@@ -98,6 +100,8 @@ pub async fn chat_completions(
         PolicyPhase::BeforeModel,
         &headers,
         &relay_request,
+        &body,
+        None,
     )
     .map_err(|error| fail_lifecycle(&state, &mut lifecycle, error))?;
 
@@ -111,7 +115,7 @@ pub async fn chat_completions(
     );
     let provider_response = state
         .openai
-        .chat_completions(authorization, body)
+        .chat_completions(authorization, &body)
         .await
         .map_err(|error| fail_lifecycle(&state, &mut lifecycle, ApiError::provider(error)))?;
     lifecycle.record_event(
@@ -120,7 +124,29 @@ pub async fn chat_completions(
     );
 
     lifecycle.record_phase(LifecyclePhase::AfterModel);
+    apply_policy_phase(
+        &state,
+        &mut lifecycle,
+        PolicyPhase::AfterModel,
+        &headers,
+        &relay_request,
+        &body,
+        Some(&provider_response.body),
+    )
+    .map_err(|error| fail_lifecycle(&state, &mut lifecycle, error))?;
+
     lifecycle.record_phase(LifecyclePhase::BeforeResponse);
+    apply_policy_phase(
+        &state,
+        &mut lifecycle,
+        PolicyPhase::BeforeResponse,
+        &headers,
+        &relay_request,
+        &body,
+        Some(&provider_response.body),
+    )
+    .map_err(|error| fail_lifecycle(&state, &mut lifecycle, error))?;
+
     lifecycle.record_success(provider_response.status);
     lifecycle.record_phase(LifecyclePhase::ResponseSent);
     lifecycle.emit_tracing_events();
@@ -334,8 +360,15 @@ fn apply_policy_phase(
     phase: PolicyPhase,
     headers: &HeaderMap,
     request: &RelayRequest,
+    request_body: &Value,
+    response_body: Option<&Value>,
 ) -> Result<(), ApiError> {
-    let ctx = PolicyContext { headers, request };
+    let ctx = PolicyContext {
+        headers,
+        request,
+        request_body,
+        response_body,
+    };
 
     for decision in state.policy_engine.evaluate(phase, &ctx) {
         lifecycle.record_event(

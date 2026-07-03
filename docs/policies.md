@@ -42,6 +42,8 @@ Only these policy phases are currently implemented:
 | --- | --- | --- |
 | `before_input` | After the request body is parsed and normalized, before model routing/auth/provider work. | Block requests based on normalized request fields. |
 | `before_model` | Immediately before provider auth and provider forwarding. | Enforce tenant/app headers, block specific models, or require routing prerequisites. |
+| `after_model` | After the provider returns a response, before the relay returns it to the client. | Block responses based on provider output content or response JSON fields. |
+| `before_response` | Immediately before returning the response to the client. | Final response checks. |
 
 The broader spec includes more phases, but they are not implemented yet.
 
@@ -53,7 +55,17 @@ Conditions are ANDed together. If multiple condition fields are present, every c
 | --- | --- | --- |
 | `always` | boolean | `true` always matches. `false` never matches. |
 | `missing_header` | string | Matches when the incoming HTTP request does not include that header. Header names are case-insensitive. |
+| `header_equals` | object | Matches when a header exactly equals a value. Shape: `{ "name": "x-garden-app", "value": "support_bot" }`. |
 | `model` | string | Matches when the normalized relay request model exactly equals this value. |
+| `tenant_id` | string | Matches `X-Garden-Tenant` after header normalization. |
+| `app_id` | string | Matches `X-Garden-App` after header normalization. |
+| `user_id` | string | Matches `X-Garden-User` after header normalization. |
+| `input_contains` | string | Matches when normalized message text contains this substring. |
+| `request_json_equals` | object | Matches an exact value in the original request JSON. Shape: `{ "pointer": "/metadata/risk", "value": "high" }`. |
+| `response_contains` | string | Matches when any string inside the provider response JSON contains this substring. Useful in `after_model` or `before_response`. |
+| `response_json_equals` | object | Matches an exact value in the provider response JSON. Shape: `{ "pointer": "/choices/0/finish_reason", "value": "stop" }`. |
+| `estimated_input_tokens_greater_than` | number | Matches when the relay's rough whitespace-based input token estimate is greater than this value. |
+| `tool_name` | string | Matches when the original OpenAI-compatible request includes a tool with `function.name` equal to this value. |
 
 At least one condition must be present.
 
@@ -84,6 +96,67 @@ Example blocking one model:
   }
 }
 ```
+
+Example requiring a specific app and tenant:
+
+```json
+{
+  "name": "internal_tools_only",
+  "phase": "before_model",
+  "if": {
+    "tenant_id": "tenant_123",
+    "app_id": "internal_tools"
+  },
+  "then": {
+    "effect": "deny",
+    "reason": "Internal tools are not allowed through this relay."
+  }
+}
+```
+
+Example blocking prompt content:
+
+```json
+{
+  "name": "block_secret_requests",
+  "phase": "before_input",
+  "if": { "input_contains": "BEGIN PRIVATE KEY" },
+  "then": {
+    "effect": "deny",
+    "reason": "Request appears to contain a private key."
+  }
+}
+```
+
+Example blocking a tool:
+
+```json
+{
+  "name": "block_delete_file",
+  "phase": "before_model",
+  "if": { "tool_name": "delete_file" },
+  "then": {
+    "effect": "deny",
+    "reason": "delete_file is not allowed."
+  }
+}
+```
+
+Example blocking a provider response:
+
+```json
+{
+  "name": "block_unsupported_claims",
+  "phase": "after_model",
+  "if": { "response_contains": "unsupported claim" },
+  "then": {
+    "effect": "deny",
+    "reason": "Response contained unsupported claim text."
+  }
+}
+```
+
+JSON field conditions use [JSON Pointer](https://datatracker.ietf.org/doc/html/rfc6901) syntax. For example, `/messages/0/content` addresses `request.messages[0].content`.
 
 ## Effects
 
@@ -134,3 +207,14 @@ GARDEN_RELAY_POLICY_DIR=examples/policies cargo run
 ```
 
 Garden Relay loads every `*.yaml` and `*.yml` file in that directory at startup. Runtime-added policies are currently in-memory only.
+
+## Not Implemented Yet
+
+These are planned but not part of the current policy engine:
+
+| Capability | Status |
+| --- | --- |
+| Cost estimates | Not implemented. |
+| Analyzer outputs | Not implemented. |
+| Expression language such as `tenant == "internal" && model.starts_with("gpt-")` | Not implemented. |
+| Non-deny effects such as route, augment, retry, redact, require approval, or prompt user | Not implemented. |
