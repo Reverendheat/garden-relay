@@ -141,4 +141,5 @@ Planned areas:
 | Area | Goal |
 | --- | --- |
 | Auth and multi-tenancy | Add relay-owned authentication, tenant/app/user management, scoped policy access, and supported admin workflows for managing tenants and operators. |
+| PostgreSQL storage | Add a Postgres-backed storage provider for production and shared deployments while keeping SQLite as the simple local default. |
 | Playground | Add a UI tab for testing policies against sample chat completion requests before rolling them into active traffic. |
