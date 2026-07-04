@@ -11,6 +11,11 @@ pub async fn upsert_policy(
     State(state): State<AppState>,
     Json(policy): Json<StaticPolicy>,
 ) -> Result<(StatusCode, Json<StaticPolicy>), PolicyApiError> {
+    policy.validate().map_err(PolicyApiError::bad_request)?;
+    state
+        .storage
+        .save_policy(&policy)
+        .map_err(PolicyApiError::internal)?;
     state
         .policy_engine
         .add_policy(policy.clone())
@@ -22,6 +27,7 @@ pub async fn upsert_policy(
 #[derive(Debug)]
 pub struct PolicyApiError {
     status: StatusCode,
+    error: &'static str,
     message: String,
 }
 
@@ -29,6 +35,15 @@ impl PolicyApiError {
     fn bad_request(error: anyhow::Error) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
+            error: "invalid_policy",
+            message: error.to_string(),
+        }
+    }
+
+    fn internal(error: anyhow::Error) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            error: "storage_error",
             message: error.to_string(),
         }
     }
@@ -39,7 +54,7 @@ impl IntoResponse for PolicyApiError {
         (
             self.status,
             Json(PolicyApiErrorBody {
-                error: "invalid_policy",
+                error: self.error,
                 message: self.message,
             }),
         )

@@ -16,6 +16,9 @@ COPY --from=builder /app/target/release/gardenrelay /usr/local/bin/gardenrelay
 ENV GARDEN_RELAY_HOST=0.0.0.0
 ENV GARDEN_RELAY_PORT=8080
 ENV OPENAI_BASE_URL=https://api.openai.com
+ENV GARDEN_RELAY_DATABASE_PATH=/data/gardenrelay.db
+
+VOLUME ["/data"]
 
 EXPOSE 8080
 

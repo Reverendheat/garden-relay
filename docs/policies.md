@@ -1,6 +1,6 @@
 # Policy Authoring
 
-Garden Relay starts with no active policies. Policies can be added at runtime with `POST /v1/policies` or bootstrapped from YAML files with `GARDEN_RELAY_POLICY_DIR`.
+Garden Relay starts with no active policies in a new database. Policies can be added at runtime with `POST /v1/policies` or bootstrapped from YAML files with `GARDEN_RELAY_POLICY_DIR`.
 
 This document describes the policy fields supported by the current implementation.
 
@@ -195,15 +195,18 @@ Currently implemented effects:
 | `log` | `level` optional `trace`/`debug`/`info`/`warn`/`error`, `message` optional string | Records a lifecycle policy effect event and emits a tracing log. Does not stop the request. |
 | `disable_tools` | `tools` array of tool names | Removes matching OpenAI-compatible tools from the outgoing request before provider forwarding. Only applies in request-side phases. |
 | `augment` | `messages` array of `{ "role": "...", "content": "..." }` | Appends messages to the outgoing OpenAI-compatible request before provider forwarding. Only applies in request-side phases. |
-| `require_approval` | `reason` optional string | Stops the request and returns `409 approval_required`. It records that approval is needed, but there is no approval queue/resume workflow yet. |
+| `require_approval` | `reason` optional string | Stops the request, returns `409 approval_required`, and creates a pending approval record. Approval decisions are stored, but approved requests are not replayed automatically yet. |
 
 If a terminal effect such as `deny` or `require_approval` fires, provider forwarding does not happen. The request timeline records:
 
 ```text
 policy.evaluated
 policy.effect.applied
+approval.created
 request_failed
 ```
+
+`approval.created` only appears for `require_approval`.
 
 Example requiring approval for a tool:
 
@@ -260,6 +263,17 @@ List active policies:
 
 ```sh
 curl http://127.0.0.1:8080/v1/policies
+```
+
+Policies added through this endpoint are persisted to SQLite at `GARDEN_RELAY_DATABASE_PATH`.
+
+List and decide approvals:
+
+```sh
+curl http://127.0.0.1:8080/v1/approvals
+curl http://127.0.0.1:8080/v1/approvals/{approval_id}
+curl -X POST http://127.0.0.1:8080/v1/approvals/{approval_id}/approve
+curl -X POST http://127.0.0.1:8080/v1/approvals/{approval_id}/deny
 ```
 
 ## File Bootstrap

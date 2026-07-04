@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     config::Config, lifecycle::LifecycleSnapshot, policy::PolicyEngine,
-    provider::openai_compatible::OpenAiCompatibleClient,
+    provider::openai_compatible::OpenAiCompatibleClient, storage::Storage,
 };
 
 #[derive(Clone)]
@@ -13,26 +13,59 @@ pub struct AppState {
     pub openai: OpenAiCompatibleClient,
     pub lifecycle_store: LifecycleStore,
     pub policy_engine: PolicyEngine,
+    pub storage: Storage,
 }
 
 impl AppState {
     pub fn from_config(config: &Config) -> anyhow::Result<Self> {
-        Ok(Self::new(
+        let storage = Storage::open(&config.database_path)?;
+        let policy_engine = PolicyEngine::from_policies(storage.list_policies()?);
+
+        for policy in PolicyEngine::from_dir(&config.policy_dir)?.list_policies() {
+            storage.save_policy(&policy)?;
+            policy_engine.add_policy(policy)?;
+        }
+
+        Ok(Self::with_storage(
             OpenAiCompatibleClient::new(config.openai_base_url.clone()),
             LifecycleStore::new(config.lifecycle_store_capacity),
-            PolicyEngine::from_dir(&config.policy_dir)?,
+            policy_engine,
+            storage,
         ))
     }
 
+    #[cfg(test)]
     pub fn new(
         openai: OpenAiCompatibleClient,
         lifecycle_store: LifecycleStore,
         policy_engine: PolicyEngine,
     ) -> Self {
+        Self::with_storage(
+            openai,
+            lifecycle_store,
+            policy_engine,
+            Storage::in_memory().expect("in-memory storage"),
+        )
+    }
+
+    pub fn with_storage(
+        openai: OpenAiCompatibleClient,
+        lifecycle_store: LifecycleStore,
+        policy_engine: PolicyEngine,
+        storage: Storage,
+    ) -> Self {
         Self {
             openai,
             lifecycle_store,
             policy_engine,
+            storage,
+        }
+    }
+
+    pub fn save_lifecycle(&self, snapshot: LifecycleSnapshot) {
+        self.lifecycle_store.save(snapshot.clone());
+        if let Err(error) = self.storage.save_lifecycle(&snapshot) {
+            tracing::error!("failed to persist lifecycle snapshot: {error}");
         }
     }
 }

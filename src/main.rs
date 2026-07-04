@@ -5,6 +5,7 @@ mod lifecycle;
 mod policy;
 mod provider;
 mod state;
+mod storage;
 
 use tokio::net::TcpListener;
 

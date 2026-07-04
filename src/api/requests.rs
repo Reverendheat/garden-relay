@@ -8,18 +8,31 @@ use serde::Serialize;
 use crate::{lifecycle::LifecycleSnapshot, state::AppState};
 
 pub async fn list_requests(State(state): State<AppState>) -> Json<Vec<LifecycleSnapshot>> {
-    Json(state.lifecycle_store.list())
+    match state.storage.list_lifecycles() {
+        Ok(snapshots) => Json(snapshots),
+        Err(error) => {
+            tracing::error!("failed to list persisted request lifecycles: {error}");
+            Json(state.lifecycle_store.list())
+        }
+    }
 }
 
 pub async fn request_timeline(
     State(state): State<AppState>,
     Path(request_id): Path<String>,
 ) -> Result<Json<LifecycleSnapshot>, RequestLookupError> {
-    state
-        .lifecycle_store
-        .get(&request_id)
-        .map(Json)
-        .ok_or(RequestLookupError { request_id })
+    if let Some(snapshot) = state.lifecycle_store.get(&request_id) {
+        return Ok(Json(snapshot));
+    }
+
+    match state.storage.get_lifecycle(&request_id) {
+        Ok(Some(snapshot)) => Ok(Json(snapshot)),
+        Ok(None) => Err(RequestLookupError { request_id }),
+        Err(error) => {
+            tracing::error!(%request_id, "failed to load persisted request lifecycle: {error}");
+            Err(RequestLookupError { request_id })
+        }
+    }
 }
 
 #[derive(Debug)]

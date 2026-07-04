@@ -162,7 +162,7 @@ pub async fn chat_completions(
     lifecycle.record_success(provider_response.status);
     lifecycle.record_phase(LifecyclePhase::ResponseSent);
     lifecycle.emit_tracing_events();
-    state.lifecycle_store.save(lifecycle.snapshot());
+    state.save_lifecycle(lifecycle.snapshot());
 
     Ok((
         provider_response.status,
@@ -264,6 +264,7 @@ pub struct ApiError {
     code: &'static str,
     message: String,
     request_id: Option<String>,
+    approval_id: Option<String>,
 }
 
 impl ApiError {
@@ -273,6 +274,7 @@ impl ApiError {
             code: "invalid_request_error",
             message: message.into(),
             request_id: None,
+            approval_id: None,
         }
     }
 
@@ -282,6 +284,7 @@ impl ApiError {
             code: "unsupported_operation",
             message: message.into(),
             request_id: None,
+            approval_id: None,
         }
     }
 
@@ -291,6 +294,7 @@ impl ApiError {
             code: "authentication_error",
             message: message.into(),
             request_id: None,
+            approval_id: None,
         }
     }
 
@@ -300,6 +304,7 @@ impl ApiError {
             code: "provider_error",
             message: error.message,
             request_id: None,
+            approval_id: None,
         }
     }
 
@@ -309,15 +314,27 @@ impl ApiError {
             code: "policy_denied",
             message: message.into(),
             request_id: None,
+            approval_id: None,
         }
     }
 
-    fn approval_required(message: impl Into<String>) -> Self {
+    fn approval_required(message: impl Into<String>, approval_id: impl Into<String>) -> Self {
         Self {
             status: StatusCode::CONFLICT,
             code: "approval_required",
             message: message.into(),
             request_id: None,
+            approval_id: Some(approval_id.into()),
+        }
+    }
+
+    fn storage(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "storage_error",
+            message: message.into(),
+            request_id: None,
+            approval_id: None,
         }
     }
 
@@ -334,6 +351,7 @@ impl IntoResponse for ApiError {
                 message: self.message,
                 r#type: self.code,
                 code: self.code,
+                approval_id: self.approval_id,
             },
         });
 
@@ -358,6 +376,8 @@ struct OpenAiError {
     #[serde(rename = "type")]
     r#type: &'static str,
     code: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    approval_id: Option<String>,
 }
 
 fn header_to_string(headers: &HeaderMap, name: &'static str) -> Option<String> {
@@ -414,7 +434,26 @@ fn apply_policy_phase(
         }
 
         if let Some(reason) = decision.approval_reason() {
-            return Err(ApiError::approval_required(reason));
+            let approval = state
+                .storage
+                .create_approval(
+                    lifecycle.request_id(),
+                    &decision.policy_name,
+                    reason,
+                    input.request_body,
+                )
+                .map_err(|error| {
+                    ApiError::storage(format!("failed to create approval request: {error}"))
+                })?;
+            lifecycle.record_event(
+                "approval.created",
+                serde_json::json!({
+                    "approval_id": approval.approval_id,
+                    "policy": decision.policy_name,
+                    "reason": reason,
+                }),
+            );
+            return Err(ApiError::approval_required(reason, approval.approval_id));
         }
     }
 
@@ -563,7 +602,7 @@ fn append_messages(
 fn fail_lifecycle(state: &AppState, lifecycle: &mut RequestLifecycle, error: ApiError) -> ApiError {
     lifecycle.record_failure(error.status, error.code);
     lifecycle.emit_tracing_events();
-    state.lifecycle_store.save(lifecycle.snapshot());
+    state.save_lifecycle(lifecycle.snapshot());
     error.with_request_id(lifecycle.request_id().to_owned())
 }
 

@@ -5,6 +5,7 @@ pub struct Config {
     pub host: String,
     pub port: u16,
     pub openai_base_url: String,
+    pub database_path: String,
     pub lifecycle_store_capacity: usize,
     pub policy_dir: String,
 }
@@ -19,6 +20,8 @@ impl Config {
             .unwrap_or(8080);
         let openai_base_url =
             env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com".to_owned());
+        let database_path =
+            env::var("GARDEN_RELAY_DATABASE_PATH").unwrap_or_else(|_| "gardenrelay.db".to_owned());
         let lifecycle_store_capacity = env::var("GARDEN_RELAY_LIFECYCLE_STORE_CAPACITY")
             .ok()
             .map(|value| value.parse())
@@ -31,6 +34,7 @@ impl Config {
             host,
             port,
             openai_base_url,
+            database_path,
             lifecycle_store_capacity,
             policy_dir,
         })
