@@ -133,3 +133,12 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 ```
 
 Garden Relay verifies that the approval is approved, matches the policy requiring approval, and matches the retried request body. Approvals are consumed after use.
+
+## Roadmap
+
+Planned areas:
+
+| Area | Goal |
+| --- | --- |
+| Auth and multi-tenancy | Add relay-owned authentication, tenant/app/user management, scoped policy access, and supported admin workflows for managing tenants and operators. |
+| Playground | Add a UI tab for testing policies against sample chat completion requests before rolling them into active traffic. |
