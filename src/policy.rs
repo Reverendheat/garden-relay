@@ -111,12 +111,17 @@ pub struct PolicyDecision {
 
 impl PolicyDecision {
     pub fn deny_reason(&self) -> Option<&str> {
-        self.effects
-            .iter()
-            .map(|effect| match effect {
-                PolicyEffect::Deny { reason } => reason.as_str(),
-            })
-            .next()
+        self.effects.iter().find_map(|effect| match effect {
+            PolicyEffect::Deny { reason } => Some(reason.as_str()),
+            _ => None,
+        })
+    }
+
+    pub fn approval_reason(&self) -> Option<&str> {
+        self.effects.iter().find_map(|effect| match effect {
+            PolicyEffect::RequireApproval { reason } => Some(reason.as_str()),
+            _ => None,
+        })
     }
 }
 
@@ -124,6 +129,10 @@ impl PolicyDecision {
 #[serde(tag = "effect", rename_all = "snake_case")]
 pub enum PolicyEffect {
     Deny { reason: String },
+    Log { level: LogLevel, message: String },
+    DisableTools { tools: Vec<String> },
+    Augment { messages: Vec<PolicyMessage> },
+    RequireApproval { reason: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,7 +170,7 @@ impl StaticPolicy {
     fn evaluate(&self, ctx: &PolicyContext<'_>) -> PolicyDecision {
         let matched = self.condition.matches(ctx);
         let effects = if matched {
-            vec![self.action.to_effect()]
+            self.action.to_effects()
         } else {
             Vec::new()
         };
@@ -326,12 +335,32 @@ impl JsonEqualsCondition {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct StaticAction {
-    pub effect: StaticEffectKind,
-    pub reason: Option<String>,
+#[serde(untagged)]
+pub enum StaticAction {
+    Single(StaticEffect),
+    Multiple { effects: Vec<StaticEffect> },
 }
 
 impl StaticAction {
+    fn to_effects(&self) -> Vec<PolicyEffect> {
+        match self {
+            Self::Single(effect) => vec![effect.to_effect()],
+            Self::Multiple { effects } => effects.iter().map(StaticEffect::to_effect).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StaticEffect {
+    pub effect: StaticEffectKind,
+    pub reason: Option<String>,
+    pub level: Option<LogLevel>,
+    pub message: Option<String>,
+    pub tools: Option<Vec<String>>,
+    pub messages: Option<Vec<PolicyMessage>>,
+}
+
+impl StaticEffect {
     fn to_effect(&self) -> PolicyEffect {
         match self.effect {
             StaticEffectKind::Deny => PolicyEffect::Deny {
@@ -339,6 +368,26 @@ impl StaticAction {
                     .reason
                     .clone()
                     .unwrap_or_else(|| "Request denied by policy.".to_owned()),
+            },
+            StaticEffectKind::Log => PolicyEffect::Log {
+                level: self.level.unwrap_or(LogLevel::Info),
+                message: self
+                    .message
+                    .clone()
+                    .or_else(|| self.reason.clone())
+                    .unwrap_or_else(|| "Policy matched.".to_owned()),
+            },
+            StaticEffectKind::DisableTools => PolicyEffect::DisableTools {
+                tools: self.tools.clone().unwrap_or_default(),
+            },
+            StaticEffectKind::Augment => PolicyEffect::Augment {
+                messages: self.messages.clone().unwrap_or_default(),
+            },
+            StaticEffectKind::RequireApproval => PolicyEffect::RequireApproval {
+                reason: self
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "Human approval is required.".to_owned()),
             },
         }
     }
@@ -348,6 +397,26 @@ impl StaticAction {
 #[serde(rename_all = "snake_case")]
 pub enum StaticEffectKind {
     Deny,
+    Log,
+    DisableTools,
+    Augment,
+    RequireApproval,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PolicyMessage {
+    pub role: String,
+    pub content: String,
 }
 
 fn is_yaml_file(path: &Path) -> bool {
@@ -399,10 +468,7 @@ mod tests {
                 missing_header: Some("x-garden-tenant".to_owned()),
                 ..StaticCondition::default()
             },
-            action: StaticAction {
-                effect: StaticEffectKind::Deny,
-                reason: Some("Tenant header required.".to_owned()),
-            },
+            action: deny_action(Some("Tenant header required.")),
         };
         let engine = PolicyEngine::from_policies(vec![policy]);
         let headers = HeaderMap::new();
@@ -430,10 +496,7 @@ mod tests {
                 missing_header: Some("x-garden-tenant".to_owned()),
                 ..StaticCondition::default()
             },
-            action: StaticAction {
-                effect: StaticEffectKind::Deny,
-                reason: None,
-            },
+            action: deny_action(None),
         };
         let engine = PolicyEngine::from_policies(vec![policy]);
         let mut headers = HeaderMap::new();
@@ -463,16 +526,10 @@ mod tests {
                 missing_header: Some("x-garden-tenant".to_owned()),
                 ..StaticCondition::default()
             },
-            action: StaticAction {
-                effect: StaticEffectKind::Deny,
-                reason: Some("first".to_owned()),
-            },
+            action: deny_action(Some("first")),
         };
         let replacement = StaticPolicy {
-            action: StaticAction {
-                effect: StaticEffectKind::Deny,
-                reason: Some("second".to_owned()),
-            },
+            action: deny_action(Some("second")),
             ..policy.clone()
         };
 
@@ -481,7 +538,11 @@ mod tests {
 
         let policies = engine.list_policies();
         assert_eq!(policies.len(), 1);
-        assert_eq!(policies[0].action.reason.as_deref(), Some("second"));
+        let effects = policies[0].action.to_effects();
+        assert!(matches!(
+            &effects[0],
+            PolicyEffect::Deny { reason } if reason == "second"
+        ));
     }
 
     #[test]
@@ -506,10 +567,7 @@ mod tests {
                 tool_name: Some("delete_file".to_owned()),
                 ..StaticCondition::default()
             },
-            action: StaticAction {
-                effect: StaticEffectKind::Deny,
-                reason: None,
-            },
+            action: deny_action(None),
         };
         let engine = PolicyEngine::from_policies(vec![policy]);
         let mut headers = HeaderMap::new();
@@ -561,10 +619,7 @@ mod tests {
                 }),
                 ..StaticCondition::default()
             },
-            action: StaticAction {
-                effect: StaticEffectKind::Deny,
-                reason: None,
-            },
+            action: deny_action(None),
         };
         let engine = PolicyEngine::from_policies(vec![policy]);
         let headers = HeaderMap::new();
@@ -602,5 +657,16 @@ mod tests {
             },
             metadata: RequestMetadata::default(),
         }
+    }
+
+    fn deny_action(reason: Option<&str>) -> StaticAction {
+        StaticAction::Single(StaticEffect {
+            effect: StaticEffectKind::Deny,
+            reason: reason.map(ToOwned::to_owned),
+            level: None,
+            message: None,
+            tools: None,
+            messages: None,
+        })
     }
 }

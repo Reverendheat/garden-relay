@@ -13,7 +13,7 @@ use crate::{
         RequestMetadata,
     },
     lifecycle::{LifecyclePhase, RequestLifecycle},
-    policy::{PolicyContext, PolicyPhase},
+    policy::{PolicyContext, PolicyEffect, PolicyMessage, PolicyPhase},
     provider::openai_compatible::ProviderError,
     state::AppState,
 };
@@ -23,7 +23,7 @@ const GARDEN_REQUEST_ID_HEADER: &str = "x-garden-request-id";
 pub async fn chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    Json(mut body): Json<Value>,
 ) -> Result<(StatusCode, HeaderMap, Json<Value>), ApiError> {
     let mut lifecycle = RequestLifecycle::new();
     lifecycle.record_phase(LifecyclePhase::RequestReceived);
@@ -84,11 +84,14 @@ pub async fn chat_completions(
     apply_policy_phase(
         &state,
         &mut lifecycle,
-        PolicyPhase::BeforeInput,
-        &headers,
-        &relay_request,
-        &body,
-        None,
+        PolicyPhaseInput {
+            phase: PolicyPhase::BeforeInput,
+            headers: &headers,
+            request: &relay_request,
+            request_body: &mut body,
+            response_body: None,
+            can_mutate_request: true,
+        },
     )
     .map_err(|error| fail_lifecycle(&state, &mut lifecycle, error))?;
 
@@ -97,11 +100,14 @@ pub async fn chat_completions(
     apply_policy_phase(
         &state,
         &mut lifecycle,
-        PolicyPhase::BeforeModel,
-        &headers,
-        &relay_request,
-        &body,
-        None,
+        PolicyPhaseInput {
+            phase: PolicyPhase::BeforeModel,
+            headers: &headers,
+            request: &relay_request,
+            request_body: &mut body,
+            response_body: None,
+            can_mutate_request: true,
+        },
     )
     .map_err(|error| fail_lifecycle(&state, &mut lifecycle, error))?;
 
@@ -127,11 +133,14 @@ pub async fn chat_completions(
     apply_policy_phase(
         &state,
         &mut lifecycle,
-        PolicyPhase::AfterModel,
-        &headers,
-        &relay_request,
-        &body,
-        Some(&provider_response.body),
+        PolicyPhaseInput {
+            phase: PolicyPhase::AfterModel,
+            headers: &headers,
+            request: &relay_request,
+            request_body: &mut body,
+            response_body: Some(&provider_response.body),
+            can_mutate_request: false,
+        },
     )
     .map_err(|error| fail_lifecycle(&state, &mut lifecycle, error))?;
 
@@ -139,11 +148,14 @@ pub async fn chat_completions(
     apply_policy_phase(
         &state,
         &mut lifecycle,
-        PolicyPhase::BeforeResponse,
-        &headers,
-        &relay_request,
-        &body,
-        Some(&provider_response.body),
+        PolicyPhaseInput {
+            phase: PolicyPhase::BeforeResponse,
+            headers: &headers,
+            request: &relay_request,
+            request_body: &mut body,
+            response_body: Some(&provider_response.body),
+            can_mutate_request: false,
+        },
     )
     .map_err(|error| fail_lifecycle(&state, &mut lifecycle, error))?;
 
@@ -300,6 +312,15 @@ impl ApiError {
         }
     }
 
+    fn approval_required(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "approval_required",
+            message: message.into(),
+            request_id: None,
+        }
+    }
+
     fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
         self.request_id = Some(request_id.into());
         self
@@ -357,20 +378,16 @@ fn authorization_from_headers(headers: &HeaderMap) -> Result<HeaderValue, ApiErr
 fn apply_policy_phase(
     state: &AppState,
     lifecycle: &mut RequestLifecycle,
-    phase: PolicyPhase,
-    headers: &HeaderMap,
-    request: &RelayRequest,
-    request_body: &Value,
-    response_body: Option<&Value>,
+    input: PolicyPhaseInput<'_>,
 ) -> Result<(), ApiError> {
     let ctx = PolicyContext {
-        headers,
-        request,
-        request_body,
-        response_body,
+        headers: input.headers,
+        request: input.request,
+        request_body: &*input.request_body,
+        response_body: input.response_body,
     };
 
-    for decision in state.policy_engine.evaluate(phase, &ctx) {
+    for decision in state.policy_engine.evaluate(input.phase, &ctx) {
         lifecycle.record_event(
             "policy.evaluated",
             serde_json::json!({
@@ -380,20 +397,167 @@ fn apply_policy_phase(
             }),
         );
 
+        if decision.matched {
+            for effect in &decision.effects {
+                apply_policy_effect(
+                    lifecycle,
+                    &decision.policy_name,
+                    effect,
+                    &mut *input.request_body,
+                    input.can_mutate_request,
+                )?;
+            }
+        }
+
         if let Some(reason) = decision.deny_reason() {
-            lifecycle.record_event(
-                "policy.effect.applied",
-                serde_json::json!({
-                    "policy": decision.policy_name,
-                    "effect": "deny",
-                    "reason": reason,
-                }),
-            );
             return Err(ApiError::policy_denied(reason));
+        }
+
+        if let Some(reason) = decision.approval_reason() {
+            return Err(ApiError::approval_required(reason));
         }
     }
 
     Ok(())
+}
+
+struct PolicyPhaseInput<'a> {
+    phase: PolicyPhase,
+    headers: &'a HeaderMap,
+    request: &'a RelayRequest,
+    request_body: &'a mut Value,
+    response_body: Option<&'a Value>,
+    can_mutate_request: bool,
+}
+
+fn apply_policy_effect(
+    lifecycle: &mut RequestLifecycle,
+    policy_name: &str,
+    effect: &PolicyEffect,
+    request_body: &mut Value,
+    can_mutate_request: bool,
+) -> Result<(), ApiError> {
+    match effect {
+        PolicyEffect::Deny { reason } => {
+            lifecycle.record_event(
+                "policy.effect.applied",
+                serde_json::json!({
+                    "policy": policy_name,
+                    "effect": "deny",
+                    "reason": reason,
+                }),
+            );
+        }
+        PolicyEffect::Log { level, message } => {
+            lifecycle.record_event(
+                "policy.effect.applied",
+                serde_json::json!({
+                    "policy": policy_name,
+                    "effect": "log",
+                    "level": level,
+                    "message": message,
+                }),
+            );
+            tracing::info!(policy = policy_name, level = ?level, message = %message, "policy log");
+        }
+        PolicyEffect::DisableTools { tools } => {
+            if !can_mutate_request {
+                lifecycle.record_event(
+                    "policy.effect.skipped",
+                    serde_json::json!({
+                        "policy": policy_name,
+                        "effect": "disable_tools",
+                        "reason": "request mutation is only available before provider forwarding",
+                    }),
+                );
+                return Ok(());
+            }
+
+            let removed = disable_tools(request_body, tools);
+            lifecycle.record_event(
+                "policy.effect.applied",
+                serde_json::json!({
+                    "policy": policy_name,
+                    "effect": "disable_tools",
+                    "tools": tools,
+                    "removed": removed,
+                }),
+            );
+        }
+        PolicyEffect::Augment { messages } => {
+            if !can_mutate_request {
+                lifecycle.record_event(
+                    "policy.effect.skipped",
+                    serde_json::json!({
+                        "policy": policy_name,
+                        "effect": "augment",
+                        "reason": "request mutation is only available before provider forwarding",
+                    }),
+                );
+                return Ok(());
+            }
+
+            let added = append_messages(request_body, messages)?;
+            lifecycle.record_event(
+                "policy.effect.applied",
+                serde_json::json!({
+                    "policy": policy_name,
+                    "effect": "augment",
+                    "messages_added": added,
+                }),
+            );
+        }
+        PolicyEffect::RequireApproval { reason } => {
+            lifecycle.record_event(
+                "policy.effect.applied",
+                serde_json::json!({
+                    "policy": policy_name,
+                    "effect": "require_approval",
+                    "reason": reason,
+                }),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn disable_tools(request_body: &mut Value, disabled_tools: &[String]) -> usize {
+    let Some(tools) = request_body.get_mut("tools").and_then(Value::as_array_mut) else {
+        return 0;
+    };
+
+    let before = tools.len();
+    tools.retain(|tool| {
+        let Some(name) = tool.pointer("/function/name").and_then(Value::as_str) else {
+            return true;
+        };
+        !disabled_tools.iter().any(|disabled| disabled == name)
+    });
+    before - tools.len()
+}
+
+fn append_messages(
+    request_body: &mut Value,
+    messages: &[PolicyMessage],
+) -> Result<usize, ApiError> {
+    let Some(existing_messages) = request_body
+        .get_mut("messages")
+        .and_then(Value::as_array_mut)
+    else {
+        return Err(ApiError::invalid_request(
+            "cannot apply augment effect because request messages is not an array",
+        ));
+    };
+
+    for message in messages {
+        existing_messages.push(serde_json::json!({
+            "role": message.role,
+            "content": message.content,
+        }));
+    }
+
+    Ok(messages.len())
 }
 
 fn fail_lifecycle(state: &AppState, lifecycle: &mut RequestLifecycle, error: ApiError) -> ApiError {
@@ -418,7 +582,7 @@ mod tests {
 
     use super::*;
     use crate::policy::{
-        PolicyEngine, StaticAction, StaticCondition, StaticEffectKind, StaticPolicy,
+        PolicyEngine, StaticAction, StaticCondition, StaticEffect, StaticEffectKind, StaticPolicy,
     };
     use crate::provider::openai_compatible::OpenAiCompatibleClient;
 
@@ -478,10 +642,7 @@ mod tests {
                 missing_header: Some("x-garden-tenant".to_owned()),
                 ..StaticCondition::default()
             },
-            action: StaticAction {
-                effect: StaticEffectKind::Deny,
-                reason: Some("Tenant header required.".to_owned()),
-            },
+            action: deny_action(Some("Tenant header required.")),
         }]);
         let state = AppState::new(
             OpenAiCompatibleClient::new("http://127.0.0.1:1".to_owned()),
@@ -511,6 +672,90 @@ mod tests {
                 .iter()
                 .any(|event| event.name == "policy.effect.applied")
         );
+    }
+
+    #[tokio::test]
+    async fn require_approval_stops_before_provider_forwarding() {
+        let policy_engine = PolicyEngine::from_policies(vec![StaticPolicy {
+            name: "approval_for_sensitive_requests".to_owned(),
+            phase: PolicyPhase::BeforeModel,
+            condition: StaticCondition {
+                always: Some(true),
+                ..StaticCondition::default()
+            },
+            action: StaticAction::Single(StaticEffect {
+                effect: StaticEffectKind::RequireApproval,
+                reason: Some("Human approval required.".to_owned()),
+                level: None,
+                message: None,
+                tools: None,
+                messages: None,
+            }),
+        }]);
+        let state = AppState::new(
+            OpenAiCompatibleClient::new("http://127.0.0.1:1".to_owned()),
+            Default::default(),
+            policy_engine,
+        );
+        let request = json!({
+            "model": "gpt-4.1-mini",
+            "messages": [{ "role": "user", "content": "hello relay" }]
+        });
+
+        let error = chat_completions(State(state.clone()), HeaderMap::new(), Json(request))
+            .await
+            .expect_err("approval should stop request");
+
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(error.code, "approval_required");
+        let request_id = error.request_id.expect("request id");
+        let snapshot = state
+            .lifecycle_store
+            .get(&request_id)
+            .expect("stored lifecycle snapshot");
+
+        assert!(
+            snapshot
+                .events
+                .iter()
+                .any(|event| event.details["effect"] == "require_approval")
+        );
+    }
+
+    #[test]
+    fn disable_tools_removes_matching_openai_tools() {
+        let mut body = json!({
+            "tools": [
+                { "type": "function", "function": { "name": "delete_file" } },
+                { "type": "function", "function": { "name": "read_file" } }
+            ]
+        });
+
+        let removed = disable_tools(&mut body, &[String::from("delete_file")]);
+
+        assert_eq!(removed, 1);
+        assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(body["tools"][0]["function"]["name"], "read_file");
+    }
+
+    #[test]
+    fn append_messages_adds_policy_messages() {
+        let mut body = json!({
+            "messages": [{ "role": "user", "content": "hello" }]
+        });
+
+        let added = append_messages(
+            &mut body,
+            &[PolicyMessage {
+                role: "system".to_owned(),
+                content: "Follow tenant policy.".to_owned(),
+            }],
+        )
+        .expect("append message");
+
+        assert_eq!(added, 1);
+        assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(body["messages"][1]["role"], "system");
     }
 
     #[test]
@@ -574,5 +819,16 @@ mod tests {
             Default::default(),
             PolicyEngine::default(),
         )
+    }
+
+    fn deny_action(reason: Option<&str>) -> StaticAction {
+        StaticAction::Single(StaticEffect {
+            effect: StaticEffectKind::Deny,
+            reason: reason.map(ToOwned::to_owned),
+            level: None,
+            message: None,
+            tools: None,
+            messages: None,
+        })
     }
 }

@@ -160,18 +160,82 @@ JSON field conditions use [JSON Pointer](https://datatracker.ietf.org/doc/html/r
 
 ## Effects
 
-Only this effect is currently implemented:
+Policies can define one effect:
+
+```json
+"then": {
+  "effect": "deny",
+  "reason": "Tenant header is required."
+}
+```
+
+Or multiple effects:
+
+```json
+"then": {
+  "effects": [
+    {
+      "effect": "log",
+      "level": "info",
+      "message": "Tenant policy matched."
+    },
+    {
+      "effect": "disable_tools",
+      "tools": ["delete_file"]
+    }
+  ]
+}
+```
+
+Currently implemented effects:
 
 | Effect | Fields | Behavior |
 | --- | --- | --- |
 | `deny` | `reason` optional string | Stops the request and returns `403 policy_denied`. |
+| `log` | `level` optional `trace`/`debug`/`info`/`warn`/`error`, `message` optional string | Records a lifecycle policy effect event and emits a tracing log. Does not stop the request. |
+| `disable_tools` | `tools` array of tool names | Removes matching OpenAI-compatible tools from the outgoing request before provider forwarding. Only applies in request-side phases. |
+| `augment` | `messages` array of `{ "role": "...", "content": "..." }` | Appends messages to the outgoing OpenAI-compatible request before provider forwarding. Only applies in request-side phases. |
+| `require_approval` | `reason` optional string | Stops the request and returns `409 approval_required`. It records that approval is needed, but there is no approval queue/resume workflow yet. |
 
-If a `deny` effect fires, provider forwarding does not happen. The request timeline records:
+If a terminal effect such as `deny` or `require_approval` fires, provider forwarding does not happen. The request timeline records:
 
 ```text
 policy.evaluated
 policy.effect.applied
 request_failed
+```
+
+Example requiring approval for a tool:
+
+```json
+{
+  "name": "approval_for_delete_file",
+  "phase": "before_model",
+  "if": { "tool_name": "delete_file" },
+  "then": {
+    "effect": "require_approval",
+    "reason": "delete_file requires human approval."
+  }
+}
+```
+
+Example augmenting a request:
+
+```json
+{
+  "name": "add_support_bot_instruction",
+  "phase": "before_model",
+  "if": { "app_id": "support_bot" },
+  "then": {
+    "effect": "augment",
+    "messages": [
+      {
+        "role": "system",
+        "content": "Use a concise support tone."
+      }
+    ]
+  }
+}
 ```
 
 ## Runtime API
@@ -217,4 +281,5 @@ These are planned but not part of the current policy engine:
 | Cost estimates | Not implemented. |
 | Analyzer outputs | Not implemented. |
 | Expression language such as `tenant == "internal" && model.starts_with("gpt-")` | Not implemented. |
-| Non-deny effects such as route, augment, retry, redact, require approval, or prompt user | Not implemented. |
+| Approval queue, approval persistence, and resume-after-approval | Not implemented. |
+| Route, retry, redact, or prompt-user effects | Not implemented. |

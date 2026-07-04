@@ -58,7 +58,10 @@ mod tests {
     use axum::extract::State;
 
     use crate::{
-        policy::{PolicyEngine, PolicyPhase, StaticAction, StaticCondition, StaticEffectKind},
+        policy::{
+            PolicyEngine, PolicyPhase, StaticAction, StaticCondition, StaticEffect,
+            StaticEffectKind,
+        },
         provider::openai_compatible::OpenAiCompatibleClient,
         state::{AppState, LifecycleStore},
     };
@@ -111,10 +114,14 @@ mod tests {
                 missing_header: Some("x-garden-tenant".to_owned()),
                 ..StaticCondition::default()
             },
-            action: StaticAction {
+            action: StaticAction::Single(StaticEffect {
                 effect: StaticEffectKind::Deny,
                 reason: Some("Tenant header is required.".to_owned()),
-            },
+                level: None,
+                message: None,
+                tools: None,
+                messages: None,
+            }),
         }
     }
 }
