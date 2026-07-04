@@ -357,7 +357,6 @@ const ADMIN_UI: &str = r#"<!doctype html>
                 <div class="field-grid">
                   <label class="wide"><span>Name</span><input id="builder-name" type="text"></label>
                   <label><span>Phase</span><select id="builder-phase"></select></label>
-                  <label><span>Effect</span><select id="builder-effect"></select></label>
                 </div>
               </div>
               <div class="builder-section">
@@ -368,7 +367,15 @@ const ADMIN_UI: &str = r#"<!doctype html>
                 </div>
               </div>
               <div class="builder-section">
-                <div class="builder-section-title">Effect Fields</div>
+                <div class="builder-section-title">Effects</div>
+                <div id="builder-effects-table"></div>
+                <div class="row-actions">
+                  <button class="action" id="builder-add-effect">Add Effect</button>
+                  <button class="action danger" id="builder-remove-effect">Remove Effect</button>
+                </div>
+                <div class="field-grid">
+                  <label class="wide"><span>Effect</span><select id="builder-effect"></select></label>
+                </div>
                 <div class="field-grid" id="builder-effect-fields"></div>
               </div>
             </div>
@@ -399,6 +406,8 @@ const ADMIN_UI: &str = r#"<!doctype html>
       approvals: [],
       activeView: "requests",
       selectedRequestId: null,
+      builderEffects: [],
+      selectedEffectIndex: 0,
     };
 
     const policyTemplate = {
@@ -507,7 +516,7 @@ const ADMIN_UI: &str = r#"<!doctype html>
       $("policies-table").innerHTML = table(["Name", "Phase", "Effect"], state.policies.map((policy) => [
         `<button class="action" data-policy="${escapeHtml(policy.name)}">${escapeHtml(policy.name)}</button>`,
         escapeHtml(policy.phase),
-        escapeHtml(policy.then.effect || "multiple"),
+        escapeHtml(effectSummary(policy.then)),
       ]));
     }
 
@@ -535,7 +544,9 @@ const ADMIN_UI: &str = r#"<!doctype html>
       $("builder-condition").innerHTML = optionsHtml(conditionOptions);
       $("builder-effect").innerHTML = optionsHtml(effectOptions);
       renderConditionFields();
-      renderEffectFields();
+      state.builderEffects = [clone(policyTemplate.then)];
+      state.selectedEffectIndex = 0;
+      fillSelectedEffectFields();
     }
 
     function renderConditionFields() {
@@ -572,6 +583,16 @@ const ADMIN_UI: &str = r#"<!doctype html>
       }
     }
 
+    function renderEffectsList() {
+      $("builder-effects-table").innerHTML = table(["Effect", "Details"], state.builderEffects.map((effect, index) => ({
+        rowClass: index === state.selectedEffectIndex ? "selected-row" : "",
+        cells: [
+          `<button class="action" data-builder-effect-index="${index}">${escapeHtml(effect.effect || "effect")}</button>`,
+          escapeHtml(effectDetails(effect)),
+        ],
+      })));
+    }
+
     function inputHtml(id, label, className = "", type = "text") {
       return `<label class="${className}"><span>${label}</span><input id="${id}" type="${type}"></label>`;
     }
@@ -592,10 +613,9 @@ const ADMIN_UI: &str = r#"<!doctype html>
       renderConditionFields();
       fillConditionFields(conditionType, condition?.[conditionType]);
 
-      const effect = Array.isArray(policy?.then?.effects) ? policy.then.effects[0] : policy?.then;
-      $("builder-effect").value = effect?.effect || policyTemplate.then.effect;
-      renderEffectFields();
-      fillEffectFields(effect || policyTemplate.then);
+      state.builderEffects = effectsFromPolicy(policy);
+      state.selectedEffectIndex = 0;
+      fillSelectedEffectFields();
     }
 
     function fillConditionFields(type, value) {
@@ -627,14 +647,22 @@ const ADMIN_UI: &str = r#"<!doctype html>
       }
     }
 
+    function fillSelectedEffectFields() {
+      const effect = selectedBuilderEffect();
+      $("builder-effect").value = effect.effect || policyTemplate.then.effect;
+      renderEffectFields();
+      fillEffectFields(effect);
+      renderEffectsList();
+    }
+
     function buildPolicyFromBuilder() {
+      updateSelectedEffectFromFields();
       const conditionType = $("builder-condition").value;
-      const effectType = $("builder-effect").value;
       return {
         name: $("builder-name").value.trim() || policyTemplate.name,
         phase: $("builder-phase").value,
         if: buildCondition(conditionType),
-        then: buildEffect(effectType),
+        then: buildAction(),
       };
     }
 
@@ -690,6 +718,80 @@ const ADMIN_UI: &str = r#"<!doctype html>
         effect,
         reason: $("builder-effect-reason").value,
       };
+    }
+
+    function buildAction() {
+      const effects = state.builderEffects.length ? state.builderEffects.map(clone) : [clone(policyTemplate.then)];
+      if (effects.length === 1) {
+        return effects[0];
+      }
+      return { effects };
+    }
+
+    function updateSelectedEffectFromFields() {
+      if (!$("builder-effect") || !state.builderEffects.length) return;
+      state.builderEffects[state.selectedEffectIndex] = buildEffect($("builder-effect").value);
+      renderEffectsList();
+    }
+
+    function selectedBuilderEffect() {
+      if (!state.builderEffects.length) {
+        state.builderEffects = [clone(policyTemplate.then)];
+      }
+      if (state.selectedEffectIndex >= state.builderEffects.length) {
+        state.selectedEffectIndex = state.builderEffects.length - 1;
+      }
+      return state.builderEffects[state.selectedEffectIndex];
+    }
+
+    function effectsFromPolicy(policy) {
+      if (Array.isArray(policy?.then?.effects) && policy.then.effects.length) {
+        return policy.then.effects.map(clone);
+      }
+      if (policy?.then?.effect) {
+        return [clone(policy.then)];
+      }
+      return [clone(policyTemplate.then)];
+    }
+
+    function defaultEffectFor(effect) {
+      if (effect === "log") {
+        return { effect, level: "info", message: "Policy matched." };
+      }
+      if (effect === "disable_tools") {
+        return { effect, tools: [] };
+      }
+      if (effect === "augment") {
+        return { effect, messages: [{ role: "system", content: "" }] };
+      }
+      if (effect === "require_approval") {
+        return { effect, reason: "Human approval is required." };
+      }
+      return { effect, reason: "Request denied by policy." };
+    }
+
+    function effectSummary(action) {
+      if (Array.isArray(action?.effects)) {
+        return action.effects.map((effect) => effect.effect).join(", ");
+      }
+      return action?.effect || "";
+    }
+
+    function effectDetails(effect) {
+      if (effect.effect === "log") {
+        return effect.message || effect.reason || effect.level || "";
+      }
+      if (effect.effect === "disable_tools") {
+        return (effect.tools || []).join(", ");
+      }
+      if (effect.effect === "augment") {
+        return effect.messages?.map((message) => `${message.role}: ${message.content}`).join(" | ") || "";
+      }
+      return effect.reason || "";
+    }
+
+    function clone(value) {
+      return JSON.parse(JSON.stringify(value));
     }
 
     function parsePolicyEditor() {
@@ -777,6 +879,30 @@ const ADMIN_UI: &str = r#"<!doctype html>
         fillBuilderFromPolicy(parsePolicyEditor() || policyTemplate);
       }
 
+      if (target.dataset.builderEffectIndex) {
+        updateSelectedEffectFromFields();
+        state.selectedEffectIndex = Number(target.dataset.builderEffectIndex);
+        fillSelectedEffectFields();
+        syncPolicyEditorFromBuilder();
+      }
+
+      if (target.id === "builder-add-effect") {
+        updateSelectedEffectFromFields();
+        state.builderEffects.push(defaultEffectFor("log"));
+        state.selectedEffectIndex = state.builderEffects.length - 1;
+        fillSelectedEffectFields();
+        syncPolicyEditorFromBuilder();
+      }
+
+      if (target.id === "builder-remove-effect") {
+        if (state.builderEffects.length > 1) {
+          state.builderEffects.splice(state.selectedEffectIndex, 1);
+          state.selectedEffectIndex = Math.max(0, state.selectedEffectIndex - 1);
+          fillSelectedEffectFields();
+          syncPolicyEditorFromBuilder();
+        }
+      }
+
       if (target.id === "save-policy") {
         const policy = JSON.parse($("policy-editor").value);
         await fetchJson("/v1/policies", {
@@ -808,7 +934,9 @@ const ADMIN_UI: &str = r#"<!doctype html>
         renderConditionFields();
       }
       if (event.target.id === "builder-effect") {
+        state.builderEffects[state.selectedEffectIndex] = defaultEffectFor(event.target.value);
         renderEffectFields();
+        fillEffectFields(selectedBuilderEffect());
       }
       if (event.target.id.startsWith("builder-") && event.target.id !== "builder-from-json" && event.target.id !== "builder-to-json") {
         syncPolicyEditorFromBuilder();

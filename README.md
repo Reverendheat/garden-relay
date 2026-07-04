@@ -72,6 +72,8 @@ http://127.0.0.1:8080/ui
 
 The UI lists recent requests, active policies, and approval requests from the same local API endpoints used by clients.
 
+The current UI is an MVP bundled into the relay for local iteration. Over time, Garden Relay will grow a separate UI service for richer administration workflows.
+
 ## Policies
 
 On a fresh database, Garden Relay starts with no policies unless you opt into bootstrapping from `GARDEN_RELAY_POLICY_DIR`. Policies persisted in SQLite are loaded again on restart.
@@ -141,5 +143,7 @@ Planned areas:
 | Area | Goal |
 | --- | --- |
 | Auth and multi-tenancy | Add relay-owned authentication, tenant/app/user management, scoped policy access, and supported admin workflows for managing tenants and operators. |
+| More providers | Add first-class provider adapters beyond OpenAI-compatible chat completions, including Ollama, Anthropic, and Gemini. |
 | PostgreSQL storage | Add a Postgres-backed storage provider for production and shared deployments while keeping SQLite as the simple local default. |
 | Playground | Add a UI tab for testing policies against sample chat completion requests before rolling them into active traffic. |
+| Separate UI service | Move beyond the bundled MVP UI toward a dedicated admin service for richer workflows and deployability. |
