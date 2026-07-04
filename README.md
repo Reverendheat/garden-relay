@@ -122,4 +122,14 @@ curl -X POST http://127.0.0.1:8080/v1/approvals/{approval_id}/approve
 curl -X POST http://127.0.0.1:8080/v1/approvals/{approval_id}/deny
 ```
 
-Approval decisions are persisted, but approved requests are not replayed automatically yet.
+To continue an approved request, retry the same chat completion request with the original provider `Authorization` header and the approval id:
+
+```sh
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H "content-type: application/json" \
+  -H "authorization: Bearer $OPENAI_API_KEY" \
+  -H "x-garden-approval-id: {approval_id}" \
+  -d '{ ... same request body ... }'
+```
+
+Garden Relay verifies that the approval is approved, matches the policy requiring approval, and matches the retried request body. Approvals are consumed after use.

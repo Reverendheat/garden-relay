@@ -195,7 +195,7 @@ Currently implemented effects:
 | `log` | `level` optional `trace`/`debug`/`info`/`warn`/`error`, `message` optional string | Records a lifecycle policy effect event and emits a tracing log. Does not stop the request. |
 | `disable_tools` | `tools` array of tool names | Removes matching OpenAI-compatible tools from the outgoing request before provider forwarding. Only applies in request-side phases. |
 | `augment` | `messages` array of `{ "role": "...", "content": "..." }` | Appends messages to the outgoing OpenAI-compatible request before provider forwarding. Only applies in request-side phases. |
-| `require_approval` | `reason` optional string | Stops the request, returns `409 approval_required`, and creates a pending approval record. Approval decisions are stored, but approved requests are not replayed automatically yet. |
+| `require_approval` | `reason` optional string | Stops the request, returns `409 approval_required`, and creates a pending approval record. Approved requests can continue when retried with `X-Garden-Approval-Id`. |
 
 If a terminal effect such as `deny` or `require_approval` fires, provider forwarding does not happen. The request timeline records:
 
@@ -207,6 +207,14 @@ request_failed
 ```
 
 `approval.created` only appears for `require_approval`.
+
+After a human approves the request through the UI or API, retry the same chat completion request with:
+
+```text
+X-Garden-Approval-Id: {approval_id}
+```
+
+Garden Relay verifies that the approval exists, is approved, matches the policy requiring approval, and matches the retried request body. The approval is consumed after use.
 
 Example requiring approval for a tool:
 
@@ -284,7 +292,7 @@ Runtime API is the intended local UX. File bootstrap is still available for star
 GARDEN_RELAY_POLICY_DIR=examples/policies cargo run
 ```
 
-Garden Relay loads every `*.yaml` and `*.yml` file in that directory at startup. Runtime-added policies are currently in-memory only.
+Garden Relay loads every `*.yaml` and `*.yml` file in that directory at startup. Runtime-added policies are persisted to SQLite.
 
 ## Not Implemented Yet
 
@@ -295,5 +303,5 @@ These are planned but not part of the current policy engine:
 | Cost estimates | Not implemented. |
 | Analyzer outputs | Not implemented. |
 | Expression language such as `tenant == "internal" && model.starts_with("gpt-")` | Not implemented. |
-| Approval queue, approval persistence, and resume-after-approval | Not implemented. |
+| Automatic background replay after approval | Not implemented. Retry with `X-Garden-Approval-Id` instead. |
 | Route, retry, redact, or prompt-user effects | Not implemented. |

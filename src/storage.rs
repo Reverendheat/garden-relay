@@ -257,6 +257,20 @@ impl Storage {
         self.get_approval(approval_id)
     }
 
+    pub fn consume_approval(&self, approval_id: &str) -> anyhow::Result<Option<ApprovalRequest>> {
+        let now = unix_timestamp();
+        self.connection()?.execute(
+            r#"
+            UPDATE approval_requests
+            SET status = 'consumed', decided_at = ?2
+            WHERE approval_id = ?1 AND status = 'approved'
+            "#,
+            params![approval_id, now],
+        )?;
+
+        self.get_approval(approval_id)
+    }
+
     fn migrate(&self) -> anyhow::Result<()> {
         self.connection()?.execute_batch(
             r#"
@@ -336,14 +350,16 @@ pub enum ApprovalStatus {
     Pending,
     Approved,
     Denied,
+    Consumed,
 }
 
 impl ApprovalStatus {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
             Self::Approved => "approved",
             Self::Denied => "denied",
+            Self::Consumed => "consumed",
         }
     }
 
@@ -351,6 +367,7 @@ impl ApprovalStatus {
         match value {
             "approved" => Self::Approved,
             "denied" => Self::Denied,
+            "consumed" => Self::Consumed,
             _ => Self::Pending,
         }
     }
@@ -451,6 +468,13 @@ mod tests {
             .expect("approval exists");
 
         assert_eq!(decided.status, ApprovalStatus::Approved);
+
+        let consumed = storage
+            .consume_approval(&approval.approval_id)
+            .expect("consume approval")
+            .expect("approval exists");
+        assert_eq!(consumed.status, ApprovalStatus::Consumed);
+
         assert_eq!(
             storage
                 .get_lifecycle(&snapshot.request_id)

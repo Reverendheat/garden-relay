@@ -183,11 +183,83 @@ const ADMIN_UI: &str = r#"<!doctype html>
       color: var(--ink);
     }
 
+    input, select {
+      width: 100%;
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 6px 8px;
+      background: var(--panel);
+      color: var(--ink);
+      font: inherit;
+    }
+
+    label {
+      display: grid;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    label span {
+      color: var(--muted);
+    }
+
     .split {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(320px, 0.7fr);
       gap: 18px;
       align-items: start;
+    }
+
+    .policy-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .policy-editor-layout {
+      display: grid;
+      grid-template-columns: minmax(320px, 1fr) minmax(320px, 1fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .builder {
+      display: grid;
+      gap: 14px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+    }
+
+    .builder-section {
+      display: grid;
+      gap: 10px;
+    }
+
+    .builder-section-title {
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 750;
+      text-transform: uppercase;
+    }
+
+    .field-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .field-grid .wide {
+      grid-column: 1 / -1;
+    }
+
+    .editor-stack {
+      display: grid;
+      gap: 10px;
     }
 
     .status {
@@ -205,6 +277,7 @@ const ADMIN_UI: &str = r#"<!doctype html>
     .status.approved { color: var(--ok); }
     .status.denied, .status.failed { color: var(--danger); }
     .status.completed { color: var(--ok); }
+    .status.consumed { color: var(--muted); }
 
     .row-actions {
       display: flex;
@@ -237,6 +310,8 @@ const ADMIN_UI: &str = r#"<!doctype html>
       }
       nav button { min-width: 160px; margin-bottom: 0; }
       .split { grid-template-columns: 1fr; }
+      .policy-layout { grid-template-columns: 1fr; }
+      .policy-editor-layout { grid-template-columns: 1fr; }
       header { align-items: flex-start; flex-direction: column; }
     }
   </style>
@@ -267,11 +342,40 @@ const ADMIN_UI: &str = r#"<!doctype html>
       <section id="policies-view" class="hidden">
         <div class="toolbar">
           <h2>Policies</h2>
-          <button class="action primary" id="save-policy">Save Policy</button>
+          <div class="row-actions">
+            <button class="action" id="builder-from-json">Load JSON</button>
+            <button class="action" id="builder-to-json">Build JSON</button>
+            <button class="action primary" id="save-policy">Save Policy</button>
+          </div>
         </div>
-        <div class="split">
+        <div class="policy-layout">
           <div id="policies-table"></div>
-          <textarea id="policy-editor" spellcheck="false"></textarea>
+          <div class="policy-editor-layout">
+            <div class="builder" id="policy-builder">
+              <div class="builder-section">
+                <div class="builder-section-title">Policy</div>
+                <div class="field-grid">
+                  <label class="wide"><span>Name</span><input id="builder-name" type="text"></label>
+                  <label><span>Phase</span><select id="builder-phase"></select></label>
+                  <label><span>Effect</span><select id="builder-effect"></select></label>
+                </div>
+              </div>
+              <div class="builder-section">
+                <div class="builder-section-title">Condition</div>
+                <div class="field-grid">
+                  <label class="wide"><span>Field</span><select id="builder-condition"></select></label>
+                  <div class="wide field-grid" id="builder-condition-fields"></div>
+                </div>
+              </div>
+              <div class="builder-section">
+                <div class="builder-section-title">Effect Fields</div>
+                <div class="field-grid" id="builder-effect-fields"></div>
+              </div>
+            </div>
+            <div class="editor-stack">
+              <textarea id="policy-editor" spellcheck="false"></textarea>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -303,6 +407,37 @@ const ADMIN_UI: &str = r#"<!doctype html>
       if: { missing_header: "x-garden-tenant" },
       then: { effect: "deny", reason: "Tenant header is required." }
     };
+
+    const phaseOptions = [
+      ["before_input", "before_input"],
+      ["before_model", "before_model"],
+      ["after_model", "after_model"],
+      ["before_response", "before_response"],
+    ];
+
+    const conditionOptions = [
+      ["always", "always"],
+      ["missing_header", "missing_header"],
+      ["header_equals", "header_equals"],
+      ["model", "model"],
+      ["tenant_id", "tenant_id"],
+      ["app_id", "app_id"],
+      ["user_id", "user_id"],
+      ["input_contains", "input_contains"],
+      ["request_json_equals", "request_json_equals"],
+      ["response_contains", "response_contains"],
+      ["response_json_equals", "response_json_equals"],
+      ["estimated_input_tokens_greater_than", "estimated_input_tokens_greater_than"],
+      ["tool_name", "tool_name"],
+    ];
+
+    const effectOptions = [
+      ["deny", "deny"],
+      ["log", "log"],
+      ["disable_tools", "disable_tools"],
+      ["augment", "augment"],
+      ["require_approval", "require_approval"],
+    ];
 
     const $ = (id) => document.getElementById(id);
     const pretty = (value) => JSON.stringify(value, null, 2);
@@ -368,6 +503,7 @@ const ADMIN_UI: &str = r#"<!doctype html>
 
     function renderPolicies() {
       $("policy-editor").value ||= pretty(state.policies[0] || policyTemplate);
+      fillBuilderFromPolicy(parsePolicyEditor() || state.policies[0] || policyTemplate);
       $("policies-table").innerHTML = table(["Name", "Phase", "Effect"], state.policies.map((policy) => [
         `<button class="action" data-policy="${escapeHtml(policy.name)}">${escapeHtml(policy.name)}</button>`,
         escapeHtml(policy.phase),
@@ -392,6 +528,193 @@ const ADMIN_UI: &str = r#"<!doctype html>
           : "",
       ]));
       $("approval-detail").textContent = pretty(state.approvals[0]);
+    }
+
+    function renderBuilderOptions() {
+      $("builder-phase").innerHTML = optionsHtml(phaseOptions);
+      $("builder-condition").innerHTML = optionsHtml(conditionOptions);
+      $("builder-effect").innerHTML = optionsHtml(effectOptions);
+      renderConditionFields();
+      renderEffectFields();
+    }
+
+    function renderConditionFields() {
+      const type = $("builder-condition").value;
+      const fields = $("builder-condition-fields");
+      if (type === "always") {
+        fields.innerHTML = `<label><span>Value</span><select id="builder-condition-value"><option value="true">true</option><option value="false">false</option></select></label>`;
+      } else if (type === "header_equals") {
+        fields.innerHTML = `${inputHtml("builder-condition-name", "Header")} ${inputHtml("builder-condition-value", "Value")}`;
+      } else if (type === "request_json_equals" || type === "response_json_equals") {
+        fields.innerHTML = `${inputHtml("builder-condition-pointer", "Pointer")} ${inputHtml("builder-condition-json", "Value", "wide")}`;
+      } else {
+        fields.innerHTML = inputHtml("builder-condition-value", "Value", "wide", type === "estimated_input_tokens_greater_than" ? "number" : "text");
+      }
+    }
+
+    function renderEffectFields() {
+      const effect = $("builder-effect").value;
+      const fields = $("builder-effect-fields");
+      if (effect === "log") {
+        fields.innerHTML = `
+          <label><span>Level</span><select id="builder-effect-level"><option value="trace">trace</option><option value="debug">debug</option><option value="info" selected>info</option><option value="warn">warn</option><option value="error">error</option></select></label>
+          ${inputHtml("builder-effect-message", "Message")}
+        `;
+      } else if (effect === "disable_tools") {
+        fields.innerHTML = inputHtml("builder-effect-tools", "Tools", "wide");
+      } else if (effect === "augment") {
+        fields.innerHTML = `
+          <label><span>Role</span><select id="builder-effect-role"><option value="system">system</option><option value="developer">developer</option><option value="user">user</option><option value="assistant">assistant</option><option value="tool">tool</option></select></label>
+          ${inputHtml("builder-effect-content", "Content", "wide")}
+        `;
+      } else {
+        fields.innerHTML = inputHtml("builder-effect-reason", "Reason", "wide");
+      }
+    }
+
+    function inputHtml(id, label, className = "", type = "text") {
+      return `<label class="${className}"><span>${label}</span><input id="${id}" type="${type}"></label>`;
+    }
+
+    function optionsHtml(options) {
+      return options.map(([value, label]) => `<option value="${value}">${label}</option>`).join("");
+    }
+
+    function fillBuilderFromPolicy(policy) {
+      if (!$("builder-name")) return;
+
+      $("builder-name").value = policy?.name || policyTemplate.name;
+      $("builder-phase").value = policy?.phase || policyTemplate.phase;
+
+      const condition = policy?.if || policyTemplate.if;
+      const conditionType = firstKnownKey(condition, conditionOptions.map(([value]) => value)) || "missing_header";
+      $("builder-condition").value = conditionType;
+      renderConditionFields();
+      fillConditionFields(conditionType, condition?.[conditionType]);
+
+      const effect = Array.isArray(policy?.then?.effects) ? policy.then.effects[0] : policy?.then;
+      $("builder-effect").value = effect?.effect || policyTemplate.then.effect;
+      renderEffectFields();
+      fillEffectFields(effect || policyTemplate.then);
+    }
+
+    function fillConditionFields(type, value) {
+      if (type === "always") {
+        $("builder-condition-value").value = String(value ?? true);
+      } else if (type === "header_equals") {
+        $("builder-condition-name").value = value?.name || "";
+        $("builder-condition-value").value = value?.value || "";
+      } else if (type === "request_json_equals" || type === "response_json_equals") {
+        $("builder-condition-pointer").value = value?.pointer || "";
+        $("builder-condition-json").value = value?.value === undefined ? "" : JSON.stringify(value.value);
+      } else {
+        $("builder-condition-value").value = value ?? "";
+      }
+    }
+
+    function fillEffectFields(effect) {
+      if (effect.effect === "log") {
+        $("builder-effect-level").value = effect.level || "info";
+        $("builder-effect-message").value = effect.message || effect.reason || "";
+      } else if (effect.effect === "disable_tools") {
+        $("builder-effect-tools").value = (effect.tools || []).join(", ");
+      } else if (effect.effect === "augment") {
+        const message = effect.messages?.[0] || {};
+        $("builder-effect-role").value = message.role || "system";
+        $("builder-effect-content").value = message.content || "";
+      } else {
+        $("builder-effect-reason").value = effect.reason || "";
+      }
+    }
+
+    function buildPolicyFromBuilder() {
+      const conditionType = $("builder-condition").value;
+      const effectType = $("builder-effect").value;
+      return {
+        name: $("builder-name").value.trim() || policyTemplate.name,
+        phase: $("builder-phase").value,
+        if: buildCondition(conditionType),
+        then: buildEffect(effectType),
+      };
+    }
+
+    function syncPolicyEditorFromBuilder() {
+      $("policy-editor").value = pretty(buildPolicyFromBuilder());
+    }
+
+    function buildCondition(type) {
+      if (type === "always") {
+        return { always: $("builder-condition-value").value === "true" };
+      }
+      if (type === "header_equals") {
+        return { header_equals: { name: $("builder-condition-name").value.trim(), value: $("builder-condition-value").value } };
+      }
+      if (type === "request_json_equals" || type === "response_json_equals") {
+        return {
+          [type]: {
+            pointer: $("builder-condition-pointer").value.trim(),
+            value: parseJsonValue($("builder-condition-json").value),
+          },
+        };
+      }
+      if (type === "estimated_input_tokens_greater_than") {
+        return { [type]: Number($("builder-condition-value").value || 0) };
+      }
+      return { [type]: $("builder-condition-value").value };
+    }
+
+    function buildEffect(effect) {
+      if (effect === "log") {
+        return {
+          effect,
+          level: $("builder-effect-level").value,
+          message: $("builder-effect-message").value,
+        };
+      }
+      if (effect === "disable_tools") {
+        return {
+          effect,
+          tools: splitList($("builder-effect-tools").value),
+        };
+      }
+      if (effect === "augment") {
+        return {
+          effect,
+          messages: [{
+            role: $("builder-effect-role").value,
+            content: $("builder-effect-content").value,
+          }],
+        };
+      }
+      return {
+        effect,
+        reason: $("builder-effect-reason").value,
+      };
+    }
+
+    function parsePolicyEditor() {
+      try {
+        return JSON.parse($("policy-editor").value);
+      } catch {
+        return null;
+      }
+    }
+
+    function parseJsonValue(value) {
+      if (!value.trim()) return null;
+      try {
+        return JSON.parse(value);
+      } catch {
+        return value;
+      }
+    }
+
+    function splitList(value) {
+      return value.split(",").map((item) => item.trim()).filter(Boolean);
+    }
+
+    function firstKnownKey(value, keys) {
+      return keys.find((key) => Object.prototype.hasOwnProperty.call(value || {}, key));
     }
 
     function table(headers, rows) {
@@ -443,6 +766,15 @@ const ADMIN_UI: &str = r#"<!doctype html>
       if (target.dataset.policy) {
         const policy = state.policies.find((item) => item.name === target.dataset.policy);
         $("policy-editor").value = pretty(policy || policyTemplate);
+        fillBuilderFromPolicy(policy || policyTemplate);
+      }
+
+      if (target.id === "builder-to-json") {
+        $("policy-editor").value = pretty(buildPolicyFromBuilder());
+      }
+
+      if (target.id === "builder-from-json") {
+        fillBuilderFromPolicy(parsePolicyEditor() || policyTemplate);
       }
 
       if (target.id === "save-policy") {
@@ -471,6 +803,25 @@ const ADMIN_UI: &str = r#"<!doctype html>
       }
     });
 
+    document.addEventListener("change", (event) => {
+      if (event.target.id === "builder-condition") {
+        renderConditionFields();
+      }
+      if (event.target.id === "builder-effect") {
+        renderEffectFields();
+      }
+      if (event.target.id.startsWith("builder-") && event.target.id !== "builder-from-json" && event.target.id !== "builder-to-json") {
+        syncPolicyEditorFromBuilder();
+      }
+    });
+
+    document.addEventListener("input", (event) => {
+      if (event.target.id.startsWith("builder-")) {
+        syncPolicyEditorFromBuilder();
+      }
+    });
+
+    renderBuilderOptions();
     refresh().catch((error) => {
       $("request-detail").textContent = error.message;
     });
