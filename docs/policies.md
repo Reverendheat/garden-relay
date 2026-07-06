@@ -195,39 +195,13 @@ Currently implemented effects:
 | `log` | `level` optional `trace`/`debug`/`info`/`warn`/`error`, `message` optional string | Records a lifecycle policy effect event and emits a tracing log. Does not stop the request. |
 | `disable_tools` | `tools` array of tool names | Removes matching OpenAI-compatible tools from the outgoing request before provider forwarding. Only applies in request-side phases. |
 | `augment` | `mode` optional `append`/`prepend`/`replace`, `messages` array of `{ "role": "...", "content": "..." }` | Mutates request messages in request-side phases, or provider response content in response-side phases. Defaults to `append`. |
-| `require_approval` | `reason` optional string | Stops the request, returns `409 approval_required`, and creates a pending approval record. Approved requests can continue when retried with `X-Garden-Approval-Id`. |
 
-If a terminal effect such as `deny` or `require_approval` fires, provider forwarding does not happen. The request timeline records:
+If a terminal effect such as `deny` fires, provider forwarding does not happen. The request timeline records:
 
 ```text
 policy.evaluated
 policy.effect.applied
-approval.created
 request_failed
-```
-
-`approval.created` only appears for `require_approval`.
-
-After a human approves the request through the UI or API, retry the same chat completion request with:
-
-```text
-X-Garden-Approval-Id: {approval_id}
-```
-
-Garden Relay verifies that the approval exists, is approved, matches the policy requiring approval, and matches the retried request body. The approval is consumed after use.
-
-Example requiring approval for a tool:
-
-```json
-{
-  "name": "approval_for_delete_file",
-  "phase": "before_model",
-  "if": { "tool_name": "delete_file" },
-  "then": {
-    "effect": "require_approval",
-    "reason": "delete_file requires human approval."
-  }
-}
 ```
 
 Example augmenting a request:
@@ -296,15 +270,6 @@ curl http://127.0.0.1:8080/v1/policies
 
 Policies added through this endpoint are persisted to SQLite at `GARDEN_RELAY_DATABASE_PATH`.
 
-List and decide approvals:
-
-```sh
-curl http://127.0.0.1:8080/v1/approvals
-curl http://127.0.0.1:8080/v1/approvals/{approval_id}
-curl -X POST http://127.0.0.1:8080/v1/approvals/{approval_id}/approve
-curl -X POST http://127.0.0.1:8080/v1/approvals/{approval_id}/deny
-```
-
 ## File Bootstrap
 
 Runtime API is the intended local UX. File bootstrap is still available for startup defaults:
@@ -324,5 +289,5 @@ These are planned but not part of the current policy engine:
 | Cost estimates | Not implemented. |
 | Analyzer outputs | Not implemented. |
 | Expression language such as `tenant == "internal" && model.starts_with("gpt-")` | Not implemented. |
-| Automatic background replay after approval | Not implemented. Retry with `X-Garden-Approval-Id` instead. |
 | Route, retry, redact, or prompt-user effects | Not implemented. |
+| Human approval and workflow resume | Not implemented in Garden Relay. Keep human-in-the-loop workflow state in the application or orchestrator layer. |

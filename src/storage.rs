@@ -5,9 +5,6 @@ use std::{
 };
 
 use rusqlite::{Connection, OptionalExtension, params, types::Type};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use uuid::Uuid;
 
 use crate::{
     lifecycle::{LifecycleOutcome, LifecycleSnapshot},
@@ -159,118 +156,6 @@ impl Storage {
         Ok(snapshots)
     }
 
-    pub fn create_approval(
-        &self,
-        request_id: &str,
-        policy_name: &str,
-        reason: &str,
-        request_body: &Value,
-    ) -> anyhow::Result<ApprovalRequest> {
-        let approval = ApprovalRequest {
-            approval_id: Uuid::new_v4().to_string(),
-            request_id: request_id.to_owned(),
-            policy_name: policy_name.to_owned(),
-            reason: reason.to_owned(),
-            status: ApprovalStatus::Pending,
-            request_body: request_body.clone(),
-            created_at: unix_timestamp(),
-            decided_at: None,
-        };
-        let request_json = serde_json::to_string(&approval.request_body)?;
-
-        self.connection()?.execute(
-            r#"
-            INSERT INTO approval_requests (
-                approval_id,
-                request_id,
-                policy_name,
-                reason,
-                status,
-                request_json,
-                created_at,
-                decided_at
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-            "#,
-            params![
-                approval.approval_id,
-                approval.request_id,
-                approval.policy_name,
-                approval.reason,
-                approval.status.as_str(),
-                request_json,
-                approval.created_at,
-                approval.decided_at,
-            ],
-        )?;
-
-        Ok(approval)
-    }
-
-    pub fn list_approvals(&self) -> anyhow::Result<Vec<ApprovalRequest>> {
-        let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            r#"
-            SELECT approval_id, request_id, policy_name, reason, status, request_json, created_at, decided_at
-            FROM approval_requests
-            ORDER BY created_at DESC
-            LIMIT 250
-            "#,
-        )?;
-        let approvals = statement
-            .query_map([], approval_from_row)?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(approvals)
-    }
-
-    pub fn get_approval(&self, approval_id: &str) -> anyhow::Result<Option<ApprovalRequest>> {
-        self.connection()?
-            .query_row(
-                r#"
-                SELECT approval_id, request_id, policy_name, reason, status, request_json, created_at, decided_at
-                FROM approval_requests
-                WHERE approval_id = ?1
-                "#,
-                params![approval_id],
-                approval_from_row,
-            )
-            .optional()
-            .map_err(Into::into)
-    }
-
-    pub fn decide_approval(
-        &self,
-        approval_id: &str,
-        status: ApprovalStatus,
-    ) -> anyhow::Result<Option<ApprovalRequest>> {
-        let now = unix_timestamp();
-        self.connection()?.execute(
-            r#"
-            UPDATE approval_requests
-            SET status = ?2, decided_at = ?3
-            WHERE approval_id = ?1 AND status = 'pending'
-            "#,
-            params![approval_id, status.as_str(), now],
-        )?;
-
-        self.get_approval(approval_id)
-    }
-
-    pub fn consume_approval(&self, approval_id: &str) -> anyhow::Result<Option<ApprovalRequest>> {
-        let now = unix_timestamp();
-        self.connection()?.execute(
-            r#"
-            UPDATE approval_requests
-            SET status = 'consumed', decided_at = ?2
-            WHERE approval_id = ?1 AND status = 'approved'
-            "#,
-            params![approval_id, now],
-        )?;
-
-        self.get_approval(approval_id)
-    }
-
     fn migrate(&self) -> anyhow::Result<()> {
         self.connection()?.execute_batch(
             r#"
@@ -304,22 +189,6 @@ impl Storage {
                 ON request_lifecycles(tenant_id);
             CREATE INDEX IF NOT EXISTS idx_request_lifecycles_model
                 ON request_lifecycles(model);
-
-            CREATE TABLE IF NOT EXISTS approval_requests (
-                approval_id TEXT PRIMARY KEY,
-                request_id TEXT NOT NULL,
-                policy_name TEXT NOT NULL,
-                reason TEXT NOT NULL,
-                status TEXT NOT NULL,
-                request_json TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                decided_at INTEGER
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_approval_requests_status
-                ON approval_requests(status);
-            CREATE INDEX IF NOT EXISTS idx_approval_requests_created_at
-                ON approval_requests(created_at DESC);
             "#,
         )?;
         Ok(())
@@ -330,65 +199,6 @@ impl Storage {
             .lock()
             .map_err(|error| anyhow::anyhow!("storage lock poisoned: {error}"))
     }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ApprovalRequest {
-    pub approval_id: String,
-    pub request_id: String,
-    pub policy_name: String,
-    pub reason: String,
-    pub status: ApprovalStatus,
-    pub request_body: Value,
-    pub created_at: i64,
-    pub decided_at: Option<i64>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ApprovalStatus {
-    Pending,
-    Approved,
-    Denied,
-    Consumed,
-}
-
-impl ApprovalStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Approved => "approved",
-            Self::Denied => "denied",
-            Self::Consumed => "consumed",
-        }
-    }
-
-    fn from_str(value: &str) -> Self {
-        match value {
-            "approved" => Self::Approved,
-            "denied" => Self::Denied,
-            "consumed" => Self::Consumed,
-            _ => Self::Pending,
-        }
-    }
-}
-
-fn approval_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalRequest> {
-    let request_json = row.get::<_, String>(5)?;
-    let request_body = serde_json::from_str::<Value>(&request_json)
-        .map_err(|error| json_decode_error(5, error))?;
-    let status = row.get::<_, String>(4)?;
-
-    Ok(ApprovalRequest {
-        approval_id: row.get(0)?,
-        request_id: row.get(1)?,
-        policy_name: row.get(2)?,
-        reason: row.get(3)?,
-        status: ApprovalStatus::from_str(&status),
-        request_body,
-        created_at: row.get(6)?,
-        decided_at: row.get(7)?,
-    })
 }
 
 fn outcome_status(outcome: &LifecycleOutcome) -> &'static str {
@@ -419,7 +229,6 @@ fn json_decode_error(column: usize, error: serde_json::Error) -> rusqlite::Error
 #[cfg(test)]
 mod tests {
     use axum::http::StatusCode;
-    use serde_json::json;
 
     use crate::{
         lifecycle::{LifecyclePhase, RequestLifecycle},
@@ -441,39 +250,14 @@ mod tests {
     }
 
     #[test]
-    fn persists_lifecycles_and_approvals() {
+    fn persists_lifecycles() {
         let storage = Storage::in_memory().expect("storage");
         let mut lifecycle = RequestLifecycle::new();
         lifecycle.record_phase(LifecyclePhase::BeforeModel);
-        lifecycle.record_failure(StatusCode::CONFLICT, "approval_required");
+        lifecycle.record_failure(StatusCode::FORBIDDEN, "policy_denied");
         let snapshot = lifecycle.snapshot();
 
         storage.save_lifecycle(&snapshot).expect("save lifecycle");
-        let approval = storage
-            .create_approval(
-                &snapshot.request_id,
-                "approval_for_delete_file",
-                "delete_file requires human approval.",
-                &json!({ "model": "gpt-4.1-mini" }),
-            )
-            .expect("create approval");
-
-        let approvals = storage.list_approvals().expect("list approvals");
-        assert_eq!(approvals.len(), 1);
-        assert_eq!(approvals[0].status, ApprovalStatus::Pending);
-
-        let decided = storage
-            .decide_approval(&approval.approval_id, ApprovalStatus::Approved)
-            .expect("decide approval")
-            .expect("approval exists");
-
-        assert_eq!(decided.status, ApprovalStatus::Approved);
-
-        let consumed = storage
-            .consume_approval(&approval.approval_id)
-            .expect("consume approval")
-            .expect("approval exists");
-        assert_eq!(consumed.status, ApprovalStatus::Consumed);
 
         assert_eq!(
             storage

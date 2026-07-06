@@ -325,7 +325,6 @@ const ADMIN_UI: &str = r#"<!doctype html>
     <nav>
       <button data-view="requests" class="active">Requests <span id="request-count">0</span></button>
       <button data-view="policies">Policies <span id="policy-count">0</span></button>
-      <button data-view="approvals">Approvals <span id="approval-count">0</span></button>
     </nav>
     <section class="content">
       <section id="requests-view">
@@ -385,17 +384,6 @@ const ADMIN_UI: &str = r#"<!doctype html>
           </div>
         </div>
       </section>
-
-      <section id="approvals-view" class="hidden">
-        <div class="toolbar">
-          <h2>Approvals</h2>
-          <span class="muted" id="approvals-updated"></span>
-        </div>
-        <div class="split">
-          <div id="approvals-table"></div>
-          <pre id="approval-detail">{}</pre>
-        </div>
-      </section>
     </section>
   </main>
 
@@ -403,7 +391,6 @@ const ADMIN_UI: &str = r#"<!doctype html>
     const state = {
       requests: [],
       policies: [],
-      approvals: [],
       activeView: "requests",
       selectedRequestId: null,
       builderEffects: [],
@@ -445,7 +432,6 @@ const ADMIN_UI: &str = r#"<!doctype html>
       ["log", "log"],
       ["disable_tools", "disable_tools"],
       ["augment", "augment"],
-      ["require_approval", "require_approval"],
     ];
 
     const $ = (id) => document.getElementById(id);
@@ -461,14 +447,12 @@ const ADMIN_UI: &str = r#"<!doctype html>
     }
 
     async function refresh() {
-      const [requests, policies, approvals] = await Promise.all([
+      const [requests, policies] = await Promise.all([
         fetchJson("/v1/requests"),
         fetchJson("/v1/policies"),
-        fetchJson("/v1/approvals"),
       ]);
       state.requests = requests;
       state.policies = policies;
-      state.approvals = approvals;
       if (!state.requests.some((request) => request.request_id === state.selectedRequestId)) {
         state.selectedRequestId = state.requests[0]?.request_id || null;
       }
@@ -478,10 +462,8 @@ const ADMIN_UI: &str = r#"<!doctype html>
     function render() {
       $("request-count").textContent = state.requests.length;
       $("policy-count").textContent = state.policies.length;
-      $("approval-count").textContent = state.approvals.filter((approval) => approval.status === "pending").length;
       renderRequests();
       renderPolicies();
-      renderApprovals();
     }
 
     function renderRequests() {
@@ -518,25 +500,6 @@ const ADMIN_UI: &str = r#"<!doctype html>
         escapeHtml(policy.phase),
         escapeHtml(effectSummary(policy.then)),
       ]));
-    }
-
-    function renderApprovals() {
-      $("approvals-updated").textContent = new Date().toLocaleTimeString();
-      if (!state.approvals.length) {
-        $("approvals-table").innerHTML = table(["Approval", "Policy", "Status", "Actions"], []);
-        $("approval-detail").textContent = "{}";
-        return;
-      }
-
-      $("approvals-table").innerHTML = table(["Approval", "Policy", "Status", "Actions"], state.approvals.map((approval) => [
-        `<button class="action" data-approval="${approval.approval_id}">${shortId(approval.approval_id)}</button>`,
-        escapeHtml(approval.policy_name),
-        `<span class="status ${escapeHtml(approval.status)}">${escapeHtml(approval.status)}</span>`,
-        approval.status === "pending"
-          ? `<div class="row-actions"><button class="action primary" data-approve="${approval.approval_id}">Approve</button><button class="action danger" data-deny="${approval.approval_id}">Deny</button></div>`
-          : "",
-      ]));
-      $("approval-detail").textContent = pretty(state.approvals[0]);
     }
 
     function renderBuilderOptions() {
@@ -767,9 +730,6 @@ const ADMIN_UI: &str = r#"<!doctype html>
       if (effect === "augment") {
         return { effect, mode: "append", messages: [{ role: "system", content: "" }] };
       }
-      if (effect === "require_approval") {
-        return { effect, reason: "Human approval is required." };
-      }
       return { effect, reason: "Request denied by policy." };
     }
 
@@ -855,7 +815,7 @@ const ADMIN_UI: &str = r#"<!doctype html>
       if (target.dataset.view) {
         state.activeView = target.dataset.view;
         document.querySelectorAll("nav button").forEach((button) => button.classList.toggle("active", button.dataset.view === state.activeView));
-        ["requests", "policies", "approvals"].forEach((view) => $(`${view}-view`).classList.toggle("hidden", view !== state.activeView));
+        ["requests", "policies"].forEach((view) => $(`${view}-view`).classList.toggle("hidden", view !== state.activeView));
       }
 
       if (target.id === "refresh") {
@@ -914,21 +874,6 @@ const ADMIN_UI: &str = r#"<!doctype html>
           headers: { "content-type": "application/json" },
           body: JSON.stringify(policy),
         });
-        await refresh();
-      }
-
-      if (target.dataset.approval) {
-        const approval = state.approvals.find((item) => item.approval_id === target.dataset.approval);
-        $("approval-detail").textContent = pretty(approval || {});
-      }
-
-      if (target.dataset.approve) {
-        await fetchJson(`/v1/approvals/${target.dataset.approve}/approve`, { method: "POST" });
-        await refresh();
-      }
-
-      if (target.dataset.deny) {
-        await fetchJson(`/v1/approvals/${target.dataset.deny}/deny`, { method: "POST" });
         await refresh();
       }
     });
