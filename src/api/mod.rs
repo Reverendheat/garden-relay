@@ -3,7 +3,6 @@ use serde::Serialize;
 
 use crate::state::AppState;
 
-pub mod approvals;
 pub mod openai;
 pub mod policies;
 pub mod requests;
@@ -25,16 +24,6 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/policies",
             get(policies::list_policies).post(policies::upsert_policy),
-        )
-        .route("/v1/approvals", get(approvals::list_approvals))
-        .route("/v1/approvals/{approval_id}", get(approvals::get_approval))
-        .route(
-            "/v1/approvals/{approval_id}/approve",
-            axum::routing::post(approvals::approve_approval),
-        )
-        .route(
-            "/v1/approvals/{approval_id}/deny",
-            axum::routing::post(approvals::deny_approval),
         )
         .with_state(state)
 }

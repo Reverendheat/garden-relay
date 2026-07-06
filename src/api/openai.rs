@@ -16,11 +16,9 @@ use crate::{
     policy::{AugmentMode, PolicyContext, PolicyEffect, PolicyMessage, PolicyPhase},
     provider::openai_compatible::ProviderError,
     state::AppState,
-    storage::ApprovalStatus,
 };
 
 const GARDEN_REQUEST_ID_HEADER: &str = "x-garden-request-id";
-const GARDEN_APPROVAL_ID_HEADER: &str = "x-garden-approval-id";
 
 pub async fn chat_completions(
     State(state): State<AppState>,
@@ -83,16 +81,6 @@ pub async fn chat_completions(
         "forwarding OpenAI-compatible chat completion"
     );
 
-    let approval_id = approval_id_from_headers(&headers);
-    let approved_retry_authorization = if approval_id.is_some() {
-        Some(
-            authorization_from_headers(&headers)
-                .map_err(|error| fail_lifecycle(&state, &mut lifecycle, error))?,
-        )
-    } else {
-        None
-    };
-
     apply_policy_phase(
         &state,
         &mut lifecycle,
@@ -103,7 +91,6 @@ pub async fn chat_completions(
             request_body: &mut body,
             response_body: None,
             can_mutate_request: true,
-            approval_id: approval_id.as_deref(),
         },
     )
     .map_err(|error| fail_lifecycle(&state, &mut lifecycle, error))?;
@@ -120,16 +107,12 @@ pub async fn chat_completions(
             request_body: &mut body,
             response_body: None,
             can_mutate_request: true,
-            approval_id: approval_id.as_deref(),
         },
     )
     .map_err(|error| fail_lifecycle(&state, &mut lifecycle, error))?;
 
-    let authorization = match approved_retry_authorization {
-        Some(authorization) => authorization,
-        None => authorization_from_headers(&headers)
-            .map_err(|error| fail_lifecycle(&state, &mut lifecycle, error))?,
-    };
+    let authorization = authorization_from_headers(&headers)
+        .map_err(|error| fail_lifecycle(&state, &mut lifecycle, error))?;
 
     lifecycle.record_phase(LifecyclePhase::ProviderCall);
     lifecycle.record_event(
@@ -157,7 +140,6 @@ pub async fn chat_completions(
             request_body: &mut body,
             response_body: Some(&mut provider_response.body),
             can_mutate_request: false,
-            approval_id: approval_id.as_deref(),
         },
     )
     .map_err(|error| fail_lifecycle(&state, &mut lifecycle, error))?;
@@ -173,7 +155,6 @@ pub async fn chat_completions(
             request_body: &mut body,
             response_body: Some(&mut provider_response.body),
             can_mutate_request: false,
-            approval_id: approval_id.as_deref(),
         },
     )
     .map_err(|error| fail_lifecycle(&state, &mut lifecycle, error))?;
@@ -283,7 +264,6 @@ pub struct ApiError {
     code: &'static str,
     message: String,
     request_id: Option<String>,
-    approval_id: Option<String>,
 }
 
 impl ApiError {
@@ -293,7 +273,6 @@ impl ApiError {
             code: "invalid_request_error",
             message: message.into(),
             request_id: None,
-            approval_id: None,
         }
     }
 
@@ -303,7 +282,6 @@ impl ApiError {
             code: "unsupported_operation",
             message: message.into(),
             request_id: None,
-            approval_id: None,
         }
     }
 
@@ -313,7 +291,6 @@ impl ApiError {
             code: "authentication_error",
             message: message.into(),
             request_id: None,
-            approval_id: None,
         }
     }
 
@@ -323,7 +300,6 @@ impl ApiError {
             code: "provider_error",
             message: error.message,
             request_id: None,
-            approval_id: None,
         }
     }
 
@@ -333,37 +309,6 @@ impl ApiError {
             code: "policy_denied",
             message: message.into(),
             request_id: None,
-            approval_id: None,
-        }
-    }
-
-    fn approval_required(message: impl Into<String>, approval_id: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::CONFLICT,
-            code: "approval_required",
-            message: message.into(),
-            request_id: None,
-            approval_id: Some(approval_id.into()),
-        }
-    }
-
-    fn approval_invalid(message: impl Into<String>, approval_id: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::CONFLICT,
-            code: "approval_invalid",
-            message: message.into(),
-            request_id: None,
-            approval_id: Some(approval_id.into()),
-        }
-    }
-
-    fn storage(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "storage_error",
-            message: message.into(),
-            request_id: None,
-            approval_id: None,
         }
     }
 
@@ -380,7 +325,6 @@ impl IntoResponse for ApiError {
                 message: self.message,
                 r#type: self.code,
                 code: self.code,
-                approval_id: self.approval_id,
             },
         });
 
@@ -405,8 +349,6 @@ struct OpenAiError {
     #[serde(rename = "type")]
     r#type: &'static str,
     code: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    approval_id: Option<String>,
 }
 
 fn header_to_string(headers: &HeaderMap, name: &'static str) -> Option<String> {
@@ -422,10 +364,6 @@ fn authorization_from_headers(headers: &HeaderMap) -> Result<HeaderValue, ApiErr
             "Authorization header is required; Garden Relay forwards provider keys and does not store them",
         )
     })
-}
-
-fn approval_id_from_headers(headers: &HeaderMap) -> Option<String> {
-    header_to_string(headers, GARDEN_APPROVAL_ID_HEADER)
 }
 
 fn apply_policy_phase(
@@ -466,40 +404,6 @@ fn apply_policy_phase(
         if let Some(reason) = decision.deny_reason() {
             return Err(ApiError::policy_denied(reason));
         }
-
-        if let Some(reason) = decision.approval_reason() {
-            if let Some(approval_id) = input.approval_id {
-                verify_and_consume_approval(
-                    state,
-                    lifecycle,
-                    approval_id,
-                    &decision.policy_name,
-                    input.request_body,
-                )?;
-                continue;
-            }
-
-            let approval = state
-                .storage
-                .create_approval(
-                    lifecycle.request_id(),
-                    &decision.policy_name,
-                    reason,
-                    input.request_body,
-                )
-                .map_err(|error| {
-                    ApiError::storage(format!("failed to create approval request: {error}"))
-                })?;
-            lifecycle.record_event(
-                "approval.created",
-                serde_json::json!({
-                    "approval_id": approval.approval_id,
-                    "policy": decision.policy_name,
-                    "reason": reason,
-                }),
-            );
-            return Err(ApiError::approval_required(reason, approval.approval_id));
-        }
     }
 
     Ok(())
@@ -512,64 +416,6 @@ struct PolicyPhaseInput<'a> {
     request_body: &'a mut Value,
     response_body: Option<&'a mut Value>,
     can_mutate_request: bool,
-    approval_id: Option<&'a str>,
-}
-
-fn verify_and_consume_approval(
-    state: &AppState,
-    lifecycle: &mut RequestLifecycle,
-    approval_id: &str,
-    policy_name: &str,
-    request_body: &Value,
-) -> Result<(), ApiError> {
-    let approval = state
-        .storage
-        .get_approval(approval_id)
-        .map_err(|error| ApiError::storage(format!("failed to load approval request: {error}")))?
-        .ok_or_else(|| {
-            ApiError::approval_invalid("approval id was not found", approval_id.to_owned())
-        })?;
-
-    if approval.status != ApprovalStatus::Approved {
-        return Err(ApiError::approval_invalid(
-            format!(
-                "approval must be approved before use; current status is {}",
-                approval.status.as_str()
-            ),
-            approval_id.to_owned(),
-        ));
-    }
-
-    if approval.policy_name != policy_name {
-        return Err(ApiError::approval_invalid(
-            "approval does not match the policy requiring approval",
-            approval_id.to_owned(),
-        ));
-    }
-
-    if approval.request_body != *request_body {
-        return Err(ApiError::approval_invalid(
-            "approval request body does not match this chat completion request",
-            approval_id.to_owned(),
-        ));
-    }
-
-    state
-        .storage
-        .consume_approval(approval_id)
-        .map_err(|error| {
-            ApiError::storage(format!("failed to consume approval request: {error}"))
-        })?;
-
-    lifecycle.record_event(
-        "approval.consumed",
-        serde_json::json!({
-            "approval_id": approval_id,
-            "policy": policy_name,
-        }),
-    );
-
-    Ok(())
 }
 
 fn apply_policy_effect(
@@ -650,16 +496,6 @@ fn apply_policy_effect(
                     "effect": "augment",
                     "mode": mode,
                     "messages_changed": changed,
-                }),
-            );
-        }
-        PolicyEffect::RequireApproval { reason } => {
-            lifecycle.record_event(
-                "policy.effect.applied",
-                serde_json::json!({
-                    "policy": policy_name,
-                    "effect": "require_approval",
-                    "reason": reason,
                 }),
             );
         }
@@ -903,167 +739,6 @@ mod tests {
                 .events
                 .iter()
                 .any(|event| event.name == "policy.effect.applied")
-        );
-    }
-
-    #[tokio::test]
-    async fn require_approval_stops_before_provider_forwarding() {
-        let policy_engine = PolicyEngine::from_policies(vec![StaticPolicy {
-            name: "approval_for_sensitive_requests".to_owned(),
-            phase: PolicyPhase::BeforeModel,
-            condition: StaticCondition {
-                always: Some(true),
-                ..StaticCondition::default()
-            },
-            action: StaticAction::Single(StaticEffect {
-                effect: StaticEffectKind::RequireApproval,
-                reason: Some("Human approval required.".to_owned()),
-                level: None,
-                message: None,
-                tools: None,
-                mode: None,
-                messages: None,
-            }),
-        }]);
-        let state = AppState::new(
-            OpenAiCompatibleClient::new("http://127.0.0.1:1".to_owned()),
-            Default::default(),
-            policy_engine,
-        );
-        let request = json!({
-            "model": "gpt-4.1-mini",
-            "messages": [{ "role": "user", "content": "hello relay" }]
-        });
-
-        let error = chat_completions(State(state.clone()), HeaderMap::new(), Json(request))
-            .await
-            .expect_err("approval should stop request");
-
-        assert_eq!(error.status, StatusCode::CONFLICT);
-        assert_eq!(error.code, "approval_required");
-        let request_id = error.request_id.expect("request id");
-        let snapshot = state
-            .lifecycle_store
-            .get(&request_id)
-            .expect("stored lifecycle snapshot");
-
-        assert!(
-            snapshot
-                .events
-                .iter()
-                .any(|event| event.details["effect"] == "require_approval")
-        );
-    }
-
-    #[tokio::test]
-    async fn approved_retry_requires_provider_auth_before_consuming_approval() {
-        let policy_engine = PolicyEngine::from_policies(vec![StaticPolicy {
-            name: "approval_for_sensitive_requests".to_owned(),
-            phase: PolicyPhase::BeforeModel,
-            condition: StaticCondition {
-                always: Some(true),
-                ..StaticCondition::default()
-            },
-            action: StaticAction::Single(StaticEffect {
-                effect: StaticEffectKind::RequireApproval,
-                reason: Some("Human approval required.".to_owned()),
-                level: None,
-                message: None,
-                tools: None,
-                mode: None,
-                messages: None,
-            }),
-        }]);
-        let state = AppState::new(
-            OpenAiCompatibleClient::new("http://127.0.0.1:1".to_owned()),
-            Default::default(),
-            policy_engine,
-        );
-        let request = json!({
-            "model": "gpt-4.1-mini",
-            "messages": [{ "role": "user", "content": "hello relay" }]
-        });
-
-        let first_error = chat_completions(
-            State(state.clone()),
-            HeaderMap::new(),
-            Json(request.clone()),
-        )
-        .await
-        .expect_err("approval should be required");
-        let approval_id = first_error.approval_id.expect("approval id");
-
-        state
-            .storage
-            .decide_approval(&approval_id, ApprovalStatus::Approved)
-            .expect("approval decision")
-            .expect("approval exists");
-
-        let mut headers = HeaderMap::new();
-        headers.insert(GARDEN_APPROVAL_ID_HEADER, approval_id.parse().unwrap());
-        let retry_error = chat_completions(State(state.clone()), headers, Json(request))
-            .await
-            .expect_err("missing provider auth should stop before approval consumption");
-
-        assert_eq!(retry_error.status, StatusCode::UNAUTHORIZED);
-        assert_eq!(retry_error.code, "authentication_error");
-        assert_eq!(
-            state
-                .storage
-                .get_approval(&approval_id)
-                .expect("load approval")
-                .expect("approval exists")
-                .status,
-            ApprovalStatus::Approved
-        );
-    }
-
-    #[test]
-    fn approved_retry_consumes_matching_approval() {
-        let state = test_app_state();
-        let request_body = json!({
-            "model": "gpt-4.1-mini",
-            "messages": [{ "role": "user", "content": "hello relay" }]
-        });
-        let approval = state
-            .storage
-            .create_approval(
-                "request-123",
-                "approval_for_sensitive_requests",
-                "Human approval required.",
-                &request_body,
-            )
-            .expect("create approval");
-        state
-            .storage
-            .decide_approval(&approval.approval_id, ApprovalStatus::Approved)
-            .expect("approve")
-            .expect("approval exists");
-        let mut lifecycle = RequestLifecycle::new();
-
-        verify_and_consume_approval(
-            &state,
-            &mut lifecycle,
-            &approval.approval_id,
-            "approval_for_sensitive_requests",
-            &request_body,
-        )
-        .expect("approval consumed");
-
-        assert_eq!(
-            state
-                .storage
-                .get_approval(&approval.approval_id)
-                .expect("load approval")
-                .expect("approval exists")
-                .status,
-            ApprovalStatus::Consumed
-        );
-        assert!(
-            lifecycle
-                .events
-                .iter()
-                .any(|event| event.name == "approval.consumed")
         );
     }
 

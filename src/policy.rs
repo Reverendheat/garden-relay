@@ -116,13 +116,6 @@ impl PolicyDecision {
             _ => None,
         })
     }
-
-    pub fn approval_reason(&self) -> Option<&str> {
-        self.effects.iter().find_map(|effect| match effect {
-            PolicyEffect::RequireApproval { reason } => Some(reason.as_str()),
-            _ => None,
-        })
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -141,9 +134,6 @@ pub enum PolicyEffect {
     Augment {
         mode: AugmentMode,
         messages: Vec<PolicyMessage>,
-    },
-    RequireApproval {
-        reason: String,
     },
 }
 
@@ -397,12 +387,6 @@ impl StaticEffect {
                 mode: self.mode.unwrap_or(AugmentMode::Append),
                 messages: self.messages.clone().unwrap_or_default(),
             },
-            StaticEffectKind::RequireApproval => PolicyEffect::RequireApproval {
-                reason: self
-                    .reason
-                    .clone()
-                    .unwrap_or_else(|| "Human approval is required.".to_owned()),
-            },
         }
     }
 }
@@ -414,7 +398,6 @@ pub enum StaticEffectKind {
     Log,
     DisableTools,
     Augment,
-    RequireApproval,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]

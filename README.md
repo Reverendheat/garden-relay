@@ -70,7 +70,7 @@ Open the built-in admin UI after starting the relay:
 http://127.0.0.1:8080/ui
 ```
 
-The UI lists recent requests, active policies, and approval requests from the same local API endpoints used by clients.
+The UI lists recent requests and active policies from the same local API endpoints used by clients.
 
 The current UI is an MVP bundled into the relay for local iteration. Over time, Garden Relay will grow a separate UI service for richer administration workflows.
 
@@ -114,27 +114,9 @@ Then send a request without `x-garden-tenant`; the relay will deny it before pro
 
 Policies added with `POST /v1/policies` are persisted to SQLite and are loaded again on restart.
 
-## Approvals
+## Human-in-the-loop workflows
 
-The `require_approval` policy effect stops a request with `409 approval_required` and creates a pending approval record:
-
-```sh
-curl http://127.0.0.1:8080/v1/approvals
-curl -X POST http://127.0.0.1:8080/v1/approvals/{approval_id}/approve
-curl -X POST http://127.0.0.1:8080/v1/approvals/{approval_id}/deny
-```
-
-To continue an approved request, retry the same chat completion request with the original provider `Authorization` header and the approval id:
-
-```sh
-curl http://127.0.0.1:8080/v1/chat/completions \
-  -H "content-type: application/json" \
-  -H "authorization: Bearer $OPENAI_API_KEY" \
-  -H "x-garden-approval-id: {approval_id}" \
-  -d '{ ... same request body ... }'
-```
-
-Garden Relay verifies that the approval is approved, matches the policy requiring approval, and matches the retried request body. Approvals are consumed after use.
+Garden Relay does not own human approval or workflow resume loops. Policies can deny, log, disable tools, and mutate request or response content, but application and orchestration layers remain responsible for pausing work, collecting human input, and resuming workflow state.
 
 ## Roadmap
 

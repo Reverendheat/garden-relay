@@ -30,7 +30,7 @@ Garden Relay is an OpenTelemetry-native LLM gateway for policy, routing, augment
 
 Everything is a policy.
 
-Routing, augmentation, retries, redaction, blocking, fallback, tool gating, approval flows, eval sampling, and cost controls should all be expressible through policies.
+Routing, augmentation, retries, redaction, blocking, fallback, tool gating, eval sampling, and cost controls should all be expressible through policies.
 
 ```text
 Policy = phase + condition/analyzer + effect
@@ -55,7 +55,7 @@ THEN retry once with a citation repair instruction
 
 ```text
 IF tool_call.name = "delete_file"
-THEN require human approval
+THEN deny or disable that tool before execution
 ```
 
 ## Enforcement Model
@@ -74,7 +74,6 @@ Examples of hard enforcement:
 * Network restrictions
 * Argument validation
 * Budget limits
-* Human approval gates
 * Redaction
 * Final allow/deny decisions
 
@@ -87,10 +86,12 @@ Tell the model: "Do not call delete_file unless the user confirms."
 Good enforcement:
 
 ```rust
-if tool_call.name == "delete_file" && !approval_exists {
-    return deny("delete_file requires approval");
+if tool_call.name == "delete_file" {
+    return deny("delete_file is not allowed for this tenant");
 }
 ```
+
+Human approval and workflow resume belong to the application or orchestration layer, where graph state, business intent, approver identity, and resume semantics are available.
 
 ## Request Lifecycle
 
@@ -175,7 +176,6 @@ Useful for:
 * Tool allowlists
 * Tool denylists
 * Argument validation
-* Human approval
 * Write/delete protection
 * Network restrictions
 * File path sandboxing
@@ -427,10 +427,6 @@ pub enum PolicyEffect {
         tools: Vec<String>,
     },
 
-    RequireApproval {
-        reason: String,
-    },
-
     Retry {
         instruction: String,
         max_attempts: Option<u32>,
@@ -550,22 +546,21 @@ Tool policies should support:
 * Path restrictions
 * Network restrictions
 * Tenant ACL checks
-* Human approval
 * Read/write/delete classification
 * Budget checks
 
 Example:
 
 ```yaml
-name: approval_for_destructive_tools
+name: block_destructive_tools
 phase: before_tool_call
 
 if:
   tool_intent: destructive
 
 then:
-  effect: require_approval
-  reason: "Destructive tool call requires approval."
+  effect: deny
+  reason: "Destructive tool calls are not allowed for this tenant."
 ```
 
 ## Observability
@@ -640,7 +635,6 @@ The web UI should expose:
 * Retries
 * Redactions
 * Tool calls
-* Approvals
 
 The request detail view should show a timeline:
 
@@ -719,7 +713,6 @@ Garden Relay should store:
 * Requests
 * Trace metadata
 * Policy decisions
-* Approvals
 * Cost records
 * Eval samples
 
@@ -789,7 +782,6 @@ Potential future features:
 * Latency-aware routing
 * Provider fallback
 * Caching
-* Human approval workflows
 * Tool marketplace
 * Tenant-specific policy packs
 * RAG context policies
