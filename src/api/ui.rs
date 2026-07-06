@@ -374,7 +374,7 @@ const ADMIN_UI: &str = r#"<!doctype html>
                   <button class="action danger" id="builder-remove-effect">Remove Effect</button>
                 </div>
                 <div class="field-grid">
-                  <label class="wide"><span>Effect</span><select id="builder-effect"></select></label>
+                  <label class="wide"><span>Selected effect</span><select id="builder-effect"></select></label>
                 </div>
                 <div class="field-grid" id="builder-effect-fields"></div>
               </div>
@@ -575,6 +575,7 @@ const ADMIN_UI: &str = r#"<!doctype html>
         fields.innerHTML = inputHtml("builder-effect-tools", "Tools", "wide");
       } else if (effect === "augment") {
         fields.innerHTML = `
+          <label class="wide"><span>Augment mode</span><select id="builder-effect-mode"><option value="append">append</option><option value="prepend">prepend</option><option value="replace">replace</option></select></label>
           <label><span>Role</span><select id="builder-effect-role"><option value="system">system</option><option value="developer">developer</option><option value="user">user</option><option value="assistant">assistant</option><option value="tool">tool</option></select></label>
           ${inputHtml("builder-effect-content", "Content", "wide")}
         `;
@@ -640,6 +641,7 @@ const ADMIN_UI: &str = r#"<!doctype html>
         $("builder-effect-tools").value = (effect.tools || []).join(", ");
       } else if (effect.effect === "augment") {
         const message = effect.messages?.[0] || {};
+        $("builder-effect-mode").value = effect.mode || "append";
         $("builder-effect-role").value = message.role || "system";
         $("builder-effect-content").value = message.content || "";
       } else {
@@ -708,6 +710,7 @@ const ADMIN_UI: &str = r#"<!doctype html>
       if (effect === "augment") {
         return {
           effect,
+          mode: $("builder-effect-mode").value,
           messages: [{
             role: $("builder-effect-role").value,
             content: $("builder-effect-content").value,
@@ -762,7 +765,7 @@ const ADMIN_UI: &str = r#"<!doctype html>
         return { effect, tools: [] };
       }
       if (effect === "augment") {
-        return { effect, messages: [{ role: "system", content: "" }] };
+        return { effect, mode: "append", messages: [{ role: "system", content: "" }] };
       }
       if (effect === "require_approval") {
         return { effect, reason: "Human approval is required." };
@@ -785,7 +788,8 @@ const ADMIN_UI: &str = r#"<!doctype html>
         return (effect.tools || []).join(", ");
       }
       if (effect.effect === "augment") {
-        return effect.messages?.map((message) => `${message.role}: ${message.content}`).join(" | ") || "";
+        const messages = effect.messages?.map((message) => `${message.role}: ${message.content}`).join(" | ") || "";
+        return `${effect.mode || "append"} ${messages}`.trim();
       }
       return effect.reason || "";
     }

@@ -128,11 +128,23 @@ impl PolicyDecision {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "effect", rename_all = "snake_case")]
 pub enum PolicyEffect {
-    Deny { reason: String },
-    Log { level: LogLevel, message: String },
-    DisableTools { tools: Vec<String> },
-    Augment { messages: Vec<PolicyMessage> },
-    RequireApproval { reason: String },
+    Deny {
+        reason: String,
+    },
+    Log {
+        level: LogLevel,
+        message: String,
+    },
+    DisableTools {
+        tools: Vec<String>,
+    },
+    Augment {
+        mode: AugmentMode,
+        messages: Vec<PolicyMessage>,
+    },
+    RequireApproval {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -357,6 +369,7 @@ pub struct StaticEffect {
     pub level: Option<LogLevel>,
     pub message: Option<String>,
     pub tools: Option<Vec<String>>,
+    pub mode: Option<AugmentMode>,
     pub messages: Option<Vec<PolicyMessage>>,
 }
 
@@ -381,6 +394,7 @@ impl StaticEffect {
                 tools: self.tools.clone().unwrap_or_default(),
             },
             StaticEffectKind::Augment => PolicyEffect::Augment {
+                mode: self.mode.unwrap_or(AugmentMode::Append),
                 messages: self.messages.clone().unwrap_or_default(),
             },
             StaticEffectKind::RequireApproval => PolicyEffect::RequireApproval {
@@ -411,6 +425,14 @@ pub enum LogLevel {
     Info,
     Warn,
     Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AugmentMode {
+    Append,
+    Prepend,
+    Replace,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -666,6 +688,7 @@ mod tests {
             level: None,
             message: None,
             tools: None,
+            mode: None,
             messages: None,
         })
     }

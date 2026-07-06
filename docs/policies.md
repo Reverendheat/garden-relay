@@ -194,7 +194,7 @@ Currently implemented effects:
 | `deny` | `reason` optional string | Stops the request and returns `403 policy_denied`. |
 | `log` | `level` optional `trace`/`debug`/`info`/`warn`/`error`, `message` optional string | Records a lifecycle policy effect event and emits a tracing log. Does not stop the request. |
 | `disable_tools` | `tools` array of tool names | Removes matching OpenAI-compatible tools from the outgoing request before provider forwarding. Only applies in request-side phases. |
-| `augment` | `messages` array of `{ "role": "...", "content": "..." }` | Appends messages to the outgoing OpenAI-compatible request before provider forwarding. Only applies in request-side phases. |
+| `augment` | `mode` optional `append`/`prepend`/`replace`, `messages` array of `{ "role": "...", "content": "..." }` | Mutates request messages in request-side phases, or provider response content in response-side phases. Defaults to `append`. |
 | `require_approval` | `reason` optional string | Stops the request, returns `409 approval_required`, and creates a pending approval record. Approved requests can continue when retried with `X-Garden-Approval-Id`. |
 
 If a terminal effect such as `deny` or `require_approval` fires, provider forwarding does not happen. The request timeline records:
@@ -239,10 +239,31 @@ Example augmenting a request:
   "if": { "app_id": "support_bot" },
   "then": {
     "effect": "augment",
+    "mode": "append",
     "messages": [
       {
         "role": "system",
         "content": "Use a concise support tone."
+      }
+    ]
+  }
+}
+```
+
+Example replacing model output before it is returned:
+
+```json
+{
+  "name": "replace_unsupported_response",
+  "phase": "before_response",
+  "if": { "response_contains": "unsupported claim" },
+  "then": {
+    "effect": "augment",
+    "mode": "replace",
+    "messages": [
+      {
+        "role": "assistant",
+        "content": "I cannot return that answer because it contains an unsupported claim."
       }
     ]
   }

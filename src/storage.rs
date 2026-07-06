@@ -499,6 +499,7 @@ mod tests {
                 level: None,
                 message: None,
                 tools: None,
+                mode: None,
                 messages: None,
             }),
         }

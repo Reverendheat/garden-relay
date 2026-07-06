@@ -13,7 +13,7 @@ use crate::{
         RequestMetadata,
     },
     lifecycle::{LifecyclePhase, RequestLifecycle},
-    policy::{PolicyContext, PolicyEffect, PolicyMessage, PolicyPhase},
+    policy::{AugmentMode, PolicyContext, PolicyEffect, PolicyMessage, PolicyPhase},
     provider::openai_compatible::ProviderError,
     state::AppState,
     storage::ApprovalStatus,
@@ -136,7 +136,7 @@ pub async fn chat_completions(
         "provider_call_started",
         serde_json::json!({ "provider": "openai_compatible" }),
     );
-    let provider_response = state
+    let mut provider_response = state
         .openai
         .chat_completions(authorization, &body)
         .await
@@ -155,7 +155,7 @@ pub async fn chat_completions(
             headers: &headers,
             request: &relay_request,
             request_body: &mut body,
-            response_body: Some(&provider_response.body),
+            response_body: Some(&mut provider_response.body),
             can_mutate_request: false,
             approval_id: approval_id.as_deref(),
         },
@@ -171,7 +171,7 @@ pub async fn chat_completions(
             headers: &headers,
             request: &relay_request,
             request_body: &mut body,
-            response_body: Some(&provider_response.body),
+            response_body: Some(&mut provider_response.body),
             can_mutate_request: false,
             approval_id: approval_id.as_deref(),
         },
@@ -431,13 +431,13 @@ fn approval_id_from_headers(headers: &HeaderMap) -> Option<String> {
 fn apply_policy_phase(
     state: &AppState,
     lifecycle: &mut RequestLifecycle,
-    input: PolicyPhaseInput<'_>,
+    mut input: PolicyPhaseInput<'_>,
 ) -> Result<(), ApiError> {
     let ctx = PolicyContext {
         headers: input.headers,
         request: input.request,
         request_body: &*input.request_body,
-        response_body: input.response_body,
+        response_body: input.response_body.as_deref(),
     };
 
     for decision in state.policy_engine.evaluate(input.phase, &ctx) {
@@ -457,6 +457,7 @@ fn apply_policy_phase(
                     &decision.policy_name,
                     effect,
                     &mut *input.request_body,
+                    input.response_body.as_deref_mut(),
                     input.can_mutate_request,
                 )?;
             }
@@ -509,7 +510,7 @@ struct PolicyPhaseInput<'a> {
     headers: &'a HeaderMap,
     request: &'a RelayRequest,
     request_body: &'a mut Value,
-    response_body: Option<&'a Value>,
+    response_body: Option<&'a mut Value>,
     can_mutate_request: bool,
     approval_id: Option<&'a str>,
 }
@@ -576,6 +577,7 @@ fn apply_policy_effect(
     policy_name: &str,
     effect: &PolicyEffect,
     request_body: &mut Value,
+    response_body: Option<&mut Value>,
     can_mutate_request: bool,
 ) -> Result<(), ApiError> {
     match effect {
@@ -625,26 +627,29 @@ fn apply_policy_effect(
                 }),
             );
         }
-        PolicyEffect::Augment { messages } => {
-            if !can_mutate_request {
+        PolicyEffect::Augment { mode, messages } => {
+            let changed = if can_mutate_request {
+                apply_message_augmentation(request_body, *mode, messages)?
+            } else if let Some(response_body) = response_body {
+                apply_response_content_augmentation(response_body, *mode, messages)?
+            } else {
                 lifecycle.record_event(
                     "policy.effect.skipped",
                     serde_json::json!({
                         "policy": policy_name,
                         "effect": "augment",
-                        "reason": "request mutation is only available before provider forwarding",
+                        "reason": "no mutable request or response body is available in this phase",
                     }),
                 );
                 return Ok(());
-            }
-
-            let added = append_messages(request_body, messages)?;
+            };
             lifecycle.record_event(
                 "policy.effect.applied",
                 serde_json::json!({
                     "policy": policy_name,
                     "effect": "augment",
-                    "messages_added": added,
+                    "mode": mode,
+                    "messages_changed": changed,
                 }),
             );
         }
@@ -678,8 +683,9 @@ fn disable_tools(request_body: &mut Value, disabled_tools: &[String]) -> usize {
     before - tools.len()
 }
 
-fn append_messages(
+fn apply_message_augmentation(
     request_body: &mut Value,
+    mode: AugmentMode,
     messages: &[PolicyMessage],
 ) -> Result<usize, ApiError> {
     let Some(existing_messages) = request_body
@@ -691,14 +697,99 @@ fn append_messages(
         ));
     };
 
-    for message in messages {
-        existing_messages.push(serde_json::json!({
-            "role": message.role,
-            "content": message.content,
-        }));
+    let policy_messages = messages
+        .iter()
+        .map(|message| {
+            serde_json::json!({
+                "role": message.role,
+                "content": message.content,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    match mode {
+        AugmentMode::Append => {
+            existing_messages.extend(policy_messages);
+        }
+        AugmentMode::Prepend => {
+            let current_messages = std::mem::take(existing_messages);
+            existing_messages.extend(policy_messages);
+            existing_messages.extend(current_messages);
+        }
+        AugmentMode::Replace => {
+            *existing_messages = policy_messages;
+        }
     }
 
     Ok(messages.len())
+}
+
+fn apply_response_content_augmentation(
+    response_body: &mut Value,
+    mode: AugmentMode,
+    messages: &[PolicyMessage],
+) -> Result<usize, ApiError> {
+    let replacement_text = messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let Some(choices) = response_body
+        .get_mut("choices")
+        .and_then(Value::as_array_mut)
+    else {
+        return Err(ApiError::invalid_request(
+            "cannot apply augment effect because response choices is not an array",
+        ));
+    };
+
+    let mut changed = 0;
+    for choice in choices {
+        let Some(message) = choice.get_mut("message").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        let existing_content = message
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let content = match mode {
+            AugmentMode::Append if existing_content.is_empty() => replacement_text.clone(),
+            AugmentMode::Append if replacement_text.is_empty() => existing_content.to_owned(),
+            AugmentMode::Append => format!("{existing_content}\n{replacement_text}"),
+            AugmentMode::Prepend if existing_content.is_empty() => replacement_text.clone(),
+            AugmentMode::Prepend if replacement_text.is_empty() => existing_content.to_owned(),
+            AugmentMode::Prepend => format!("{replacement_text}\n{existing_content}"),
+            AugmentMode::Replace => replacement_text.clone(),
+        };
+        message.insert("content".to_owned(), Value::String(content));
+        changed += 1;
+    }
+
+    Ok(changed)
+}
+
+#[cfg(test)]
+fn append_messages(
+    request_body: &mut Value,
+    messages: &[PolicyMessage],
+) -> Result<usize, ApiError> {
+    apply_message_augmentation(request_body, AugmentMode::Append, messages)
+}
+
+#[cfg(test)]
+fn prepend_messages(
+    request_body: &mut Value,
+    messages: &[PolicyMessage],
+) -> Result<usize, ApiError> {
+    apply_message_augmentation(request_body, AugmentMode::Prepend, messages)
+}
+
+#[cfg(test)]
+fn replace_messages(
+    request_body: &mut Value,
+    messages: &[PolicyMessage],
+) -> Result<usize, ApiError> {
+    apply_message_augmentation(request_body, AugmentMode::Replace, messages)
 }
 
 fn fail_lifecycle(state: &AppState, lifecycle: &mut RequestLifecycle, error: ApiError) -> ApiError {
@@ -830,6 +921,7 @@ mod tests {
                 level: None,
                 message: None,
                 tools: None,
+                mode: None,
                 messages: None,
             }),
         }]);
@@ -878,6 +970,7 @@ mod tests {
                 level: None,
                 message: None,
                 tools: None,
+                mode: None,
                 messages: None,
             }),
         }]);
@@ -1011,6 +1104,102 @@ mod tests {
     }
 
     #[test]
+    fn prepend_messages_adds_policy_messages_before_existing_messages() {
+        let mut body = json!({
+            "messages": [{ "role": "user", "content": "hello" }]
+        });
+
+        let changed = prepend_messages(
+            &mut body,
+            &[PolicyMessage {
+                role: "system".to_owned(),
+                content: "Read this first.".to_owned(),
+            }],
+        )
+        .expect("prepend message");
+
+        assert_eq!(changed, 1);
+        assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][1]["role"], "user");
+    }
+
+    #[test]
+    fn replace_messages_replaces_existing_messages() {
+        let mut body = json!({
+            "messages": [{ "role": "user", "content": "hello" }]
+        });
+
+        let changed = replace_messages(
+            &mut body,
+            &[PolicyMessage {
+                role: "developer".to_owned(),
+                content: "Use this request instead.".to_owned(),
+            }],
+        )
+        .expect("replace messages");
+
+        assert_eq!(changed, 1);
+        assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(body["messages"][0]["role"], "developer");
+    }
+
+    #[test]
+    fn replace_response_content_replaces_model_output() {
+        let mut response = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "original model answer"
+                }
+            }]
+        });
+
+        let changed = apply_response_content_augmentation(
+            &mut response,
+            AugmentMode::Replace,
+            &[PolicyMessage {
+                role: "assistant".to_owned(),
+                content: "policy replacement".to_owned(),
+            }],
+        )
+        .expect("replace response");
+
+        assert_eq!(changed, 1);
+        assert_eq!(
+            response["choices"][0]["message"]["content"],
+            "policy replacement"
+        );
+    }
+
+    #[test]
+    fn prepend_response_content_adds_text_before_model_output() {
+        let mut response = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "original model answer"
+                }
+            }]
+        });
+
+        apply_response_content_augmentation(
+            &mut response,
+            AugmentMode::Prepend,
+            &[PolicyMessage {
+                role: "assistant".to_owned(),
+                content: "policy prefix".to_owned(),
+            }],
+        )
+        .expect("prepend response");
+
+        assert_eq!(
+            response["choices"][0]["message"]["content"],
+            "policy prefix\noriginal model answer"
+        );
+    }
+
+    #[test]
     fn garden_headers_become_request_metadata() {
         let mut headers = HeaderMap::new();
         headers.insert("x-garden-tenant", "tenant_123".parse().unwrap());
@@ -1080,6 +1269,7 @@ mod tests {
             level: None,
             message: None,
             tools: None,
+            mode: None,
             messages: None,
         })
     }
