@@ -262,6 +262,37 @@ const ADMIN_UI: &str = r#"<!doctype html>
       gap: 10px;
     }
 
+    .playground-layout {
+      display: grid;
+      grid-template-columns: minmax(320px, 1fr) minmax(320px, 1fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .playground-column {
+      display: grid;
+      gap: 14px;
+    }
+
+    .playground-column textarea { min-height: 150px; }
+    #playground-request { min-height: 240px; }
+    #playground-result { min-height: 180px; }
+
+    .result-summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 42px;
+      padding: 8px 12px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+    }
+
+    .result-summary.matched { border-left: 4px solid var(--warn); }
+    .result-summary.not-matched { border-left: 4px solid var(--ok); }
+    .result-summary.error { border-left: 4px solid var(--danger); }
+
     .status {
       display: inline-flex;
       align-items: center;
@@ -312,6 +343,7 @@ const ADMIN_UI: &str = r#"<!doctype html>
       .split { grid-template-columns: 1fr; }
       .policy-layout { grid-template-columns: 1fr; }
       .policy-editor-layout { grid-template-columns: 1fr; }
+      .playground-layout { grid-template-columns: 1fr; }
       header { align-items: flex-start; flex-direction: column; }
     }
   </style>
@@ -325,6 +357,7 @@ const ADMIN_UI: &str = r#"<!doctype html>
     <nav>
       <button data-view="requests" class="active">Requests <span id="request-count">0</span></button>
       <button data-view="policies">Policies <span id="policy-count">0</span></button>
+      <button data-view="playground">Playground</button>
     </nav>
     <section class="content">
       <section id="requests-view">
@@ -384,6 +417,31 @@ const ADMIN_UI: &str = r#"<!doctype html>
           </div>
         </div>
       </section>
+
+      <section id="playground-view" class="hidden">
+        <div class="toolbar">
+          <h2>Policy Playground</h2>
+          <div class="row-actions">
+            <button class="action" id="playground-use-draft">Use Policy Draft</button>
+            <button class="action primary" id="playground-run">Run Evaluation</button>
+          </div>
+        </div>
+        <div class="playground-layout">
+          <div class="playground-column">
+            <label><span>Draft policy</span><textarea id="playground-policy" spellcheck="false"></textarea></label>
+            <label><span>Sample headers</span><textarea id="playground-headers" spellcheck="false"></textarea></label>
+          </div>
+          <div class="playground-column">
+            <label><span>Chat completion request</span><textarea id="playground-request" spellcheck="false"></textarea></label>
+            <label><span>Optional provider response</span><textarea id="playground-response" spellcheck="false"></textarea></label>
+            <div class="result-summary" id="playground-summary">
+              <strong id="playground-status">Not run</strong>
+              <span class="muted" id="playground-phase"></span>
+            </div>
+            <pre id="playground-result">{}</pre>
+          </div>
+        </div>
+      </section>
     </section>
   </main>
 
@@ -402,6 +460,11 @@ const ADMIN_UI: &str = r#"<!doctype html>
       phase: "before_model",
       if: { missing_header: "x-garden-tenant" },
       then: { effect: "deny", reason: "Tenant header is required." }
+    };
+
+    const playgroundRequestTemplate = {
+      model: "gpt-4.1-mini",
+      messages: [{ role: "user", content: "Say hello from behind Garden Relay." }]
     };
 
     const phaseOptions = [
@@ -464,6 +527,67 @@ const ADMIN_UI: &str = r#"<!doctype html>
       $("policy-count").textContent = state.policies.length;
       renderRequests();
       renderPolicies();
+    }
+
+    function initializePlayground() {
+      $("playground-policy").value ||= pretty(state.policies[0] || policyTemplate);
+      $("playground-headers").value ||= pretty({});
+      $("playground-request").value ||= pretty(playgroundRequestTemplate);
+    }
+
+    async function runPlayground() {
+      const runButton = $("playground-run");
+      runButton.disabled = true;
+      runButton.textContent = "Running...";
+      setPlaygroundSummary("Running", "", "");
+      try {
+        const responseText = $("playground-response").value.trim();
+        const result = await fetchJson("/v1/playground/evaluate", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            policy: parseRequiredJson("Draft policy", $("playground-policy").value),
+            headers: parseRequiredJson("Sample headers", $("playground-headers").value),
+            request: parseRequiredJson("Chat completion request", $("playground-request").value),
+            response: responseText ? parseRequiredJson("Provider response", responseText) : null,
+          }),
+        });
+        $("playground-result").textContent = pretty(result.decision);
+        setPlaygroundSummary(
+          result.matched ? "Matched" : "Not matched",
+          result.decision.phase,
+          result.matched ? "matched" : "not-matched"
+        );
+      } catch (error) {
+        $("playground-result").textContent = formatApiError(error.message);
+        setPlaygroundSummary("Evaluation failed", "", "error");
+      } finally {
+        runButton.disabled = false;
+        runButton.textContent = "Run Evaluation";
+      }
+    }
+
+    function setPlaygroundSummary(status, phase, className) {
+      $("playground-status").textContent = status;
+      $("playground-phase").textContent = phase;
+      $("playground-summary").className = `result-summary ${className}`.trim();
+    }
+
+    function parseRequiredJson(label, value) {
+      try {
+        return JSON.parse(value);
+      } catch (error) {
+        throw new Error(`${label}: ${error.message}`);
+      }
+    }
+
+    function formatApiError(message) {
+      try {
+        const value = JSON.parse(message);
+        return value.message || pretty(value);
+      } catch {
+        return message;
+      }
     }
 
     function renderRequests() {
@@ -815,7 +939,8 @@ const ADMIN_UI: &str = r#"<!doctype html>
       if (target.dataset.view) {
         state.activeView = target.dataset.view;
         document.querySelectorAll("nav button").forEach((button) => button.classList.toggle("active", button.dataset.view === state.activeView));
-        ["requests", "policies"].forEach((view) => $(`${view}-view`).classList.toggle("hidden", view !== state.activeView));
+        ["requests", "policies", "playground"].forEach((view) => $(`${view}-view`).classList.toggle("hidden", view !== state.activeView));
+        if (state.activeView === "playground") initializePlayground();
       }
 
       if (target.id === "refresh") {
@@ -876,6 +1001,14 @@ const ADMIN_UI: &str = r#"<!doctype html>
         });
         await refresh();
       }
+
+      if (target.id === "playground-use-draft") {
+        $("playground-policy").value = $("policy-editor").value || pretty(policyTemplate);
+      }
+
+      if (target.id === "playground-run") {
+        await runPlayground();
+      }
     });
 
     document.addEventListener("change", (event) => {
@@ -899,9 +1032,23 @@ const ADMIN_UI: &str = r#"<!doctype html>
     });
 
     renderBuilderOptions();
+    initializePlayground();
     refresh().catch((error) => {
       $("request-detail").textContent = error.message;
     });
   </script>
 </body>
 </html>"#;
+
+#[cfg(test)]
+mod tests {
+    use super::ADMIN_UI;
+
+    #[test]
+    fn admin_ui_includes_policy_playground() {
+        assert!(ADMIN_UI.contains("data-view=\"playground\""));
+        assert!(ADMIN_UI.contains("id=\"playground-policy\""));
+        assert!(ADMIN_UI.contains("id=\"playground-request\""));
+        assert!(ADMIN_UI.contains("/v1/playground/evaluate"));
+    }
+}

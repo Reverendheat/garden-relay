@@ -182,7 +182,7 @@ pub struct ChatCompletionRequest {
 }
 
 impl ChatCompletionRequest {
-    fn from_body(body: &Value) -> Result<Self, ApiError> {
+    pub(crate) fn from_body(body: &Value) -> Result<Self, ApiError> {
         serde_json::from_value(body.clone())
             .map_err(|error| ApiError::invalid_request(format!("invalid request body: {error}")))
     }
@@ -212,7 +212,7 @@ impl From<ChatCompletionRequest> for RelayRequest {
 }
 
 impl ChatCompletionRequest {
-    fn into_relay_request(self, mut metadata: RequestMetadata) -> RelayRequest {
+    pub(crate) fn into_relay_request(self, mut metadata: RequestMetadata) -> RelayRequest {
         metadata.provider_metadata = self.metadata;
 
         RelayRequest {
@@ -236,7 +236,7 @@ impl ChatCompletionRequest {
 }
 
 impl RequestMetadata {
-    fn from_headers(headers: &HeaderMap) -> Self {
+    pub(crate) fn from_headers(headers: &HeaderMap) -> Self {
         Self {
             tenant_id: header_to_string(headers, "x-garden-tenant"),
             app_id: header_to_string(headers, "x-garden-app"),
@@ -267,6 +267,10 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
     fn invalid_request(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,

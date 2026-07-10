@@ -4,6 +4,7 @@ use serde::Serialize;
 use crate::state::AppState;
 
 pub mod openai;
+pub mod playground;
 pub mod policies;
 pub mod requests;
 pub mod ui;
@@ -24,6 +25,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/policies",
             get(policies::list_policies).post(policies::upsert_policy),
+        )
+        .route(
+            "/v1/playground/evaluate",
+            axum::routing::post(playground::evaluate_policy),
         )
         .with_state(state)
 }
