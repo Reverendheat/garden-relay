@@ -2,6 +2,24 @@
 
 Garden Relay (get it, Guard and Relay?) is a policy-driven LLM gateway written in Rust.
 
+## Local Development
+
+For local development with [just](https://just.systems/), start the relay with:
+
+```sh
+just run
+```
+
+The optional arguments are the port and SQLite database path:
+
+```sh
+just run 18080 /tmp/gardenrelay.db
+```
+
+Use `just run-with-policies` to bootstrap the policies under `examples/policies`, or `just check` to run formatting checks, Clippy, and tests.
+
+Without `just`, the equivalent default command is `cargo run`.
+
 ## Local Docker Run
 
 Build the image:
@@ -74,6 +92,30 @@ The UI lists recent requests and active policies from the same local API endpoin
 
 The current UI is an MVP bundled into the relay for local iteration. Over time, Garden Relay will grow a separate UI service for richer administration workflows.
 
+### Policy Playground
+
+The **Playground** tab evaluates a draft policy against a sample OpenAI-compatible chat completion without saving the policy, calling a provider, or adding a request timeline. Supply sample Garden headers to test tenant, app, user, and header conditions. An optional provider response supports `after_model` and `before_response` conditions.
+
+The same simulation is available over HTTP:
+
+```sh
+curl http://127.0.0.1:8080/v1/playground/evaluate \
+  -H "content-type: application/json" \
+  -d '{
+    "policy": {
+      "name": "require_tenant",
+      "phase": "before_model",
+      "if": { "missing_header": "x-garden-tenant" },
+      "then": { "effect": "deny", "reason": "Tenant header is required." }
+    },
+    "headers": {},
+    "request": {
+      "model": "gpt-4.1-mini",
+      "messages": [{ "role": "user", "content": "Hello" }]
+    }
+  }'
+```
+
 ## Policies
 
 On a fresh database, Garden Relay starts with no policies unless you opt into bootstrapping from `GARDEN_RELAY_POLICY_DIR`. Policies persisted in SQLite are loaded again on restart.
@@ -127,5 +169,4 @@ Planned areas:
 | Auth and multi-tenancy | Add relay-owned authentication, tenant/app/user management, scoped policy access, and supported admin workflows for managing tenants and operators. |
 | More providers | Add first-class provider adapters beyond OpenAI-compatible chat completions, including Ollama, Anthropic, and Gemini. |
 | PostgreSQL storage | Add a Postgres-backed storage provider for production and shared deployments while keeping SQLite as the simple local default. |
-| Playground | Add a UI tab for testing policies against sample chat completion requests before rolling them into active traffic. |
 | Separate UI service | Move beyond the bundled MVP UI toward a dedicated admin service for richer workflows and deployability. |
