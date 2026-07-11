@@ -8,15 +8,20 @@ use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::domain::RelayRequest;
+use crate::{domain::RelayRequest, identity::TenantScope};
 
 #[derive(Debug, Clone, Default)]
 pub struct PolicyEngine {
-    policies: Arc<RwLock<Vec<StaticPolicy>>>,
+    policies: Arc<RwLock<Vec<ScopedPolicy>>>,
 }
 
 impl PolicyEngine {
     pub fn from_policies(policies: Vec<StaticPolicy>) -> Self {
+        Self::from_scoped_policies(policies.into_iter().map(ScopedPolicy::global).collect())
+    }
+
+    pub fn from_scoped_policies(mut policies: Vec<ScopedPolicy>) -> Self {
+        policies.sort_by(ScopedPolicy::compare);
         Self {
             policies: Arc::new(RwLock::new(policies)),
         }
@@ -57,20 +62,44 @@ impl PolicyEngine {
 
         if let Some(existing) = policies
             .iter_mut()
-            .find(|existing| existing.name == policy.name)
+            .find(|existing| existing.is_global() && existing.policy.name == policy.name)
         {
+            existing.policy = policy;
+        } else {
+            policies.push(ScopedPolicy::global(policy));
+        }
+
+        policies.sort_by(ScopedPolicy::compare);
+        Ok(())
+    }
+
+    pub fn add_scoped_policy(&self, policy: ScopedPolicy) -> anyhow::Result<()> {
+        policy.policy.validate()?;
+        policy.validate_scope()?;
+        let mut policies = self
+            .policies
+            .write()
+            .map_err(|error| anyhow::anyhow!("policy store lock poisoned: {error}"))?;
+        if let Some(existing) = policies.iter_mut().find(|existing| {
+            existing.tenant_id == policy.tenant_id
+                && existing.app_id == policy.app_id
+                && existing.policy.name == policy.policy.name
+        }) {
             *existing = policy;
         } else {
             policies.push(policy);
         }
-
-        policies.sort_by(|left, right| left.name.cmp(&right.name));
+        policies.sort_by(ScopedPolicy::compare);
         Ok(())
     }
 
     pub fn list_policies(&self) -> Vec<StaticPolicy> {
         match self.policies.read() {
-            Ok(policies) => policies.clone(),
+            Ok(policies) => policies
+                .iter()
+                .filter(|policy| policy.is_global())
+                .map(|policy| policy.policy.clone())
+                .collect(),
             Err(error) => {
                 tracing::error!("policy store lock poisoned: {error}");
                 Vec::new()
@@ -79,16 +108,83 @@ impl PolicyEngine {
     }
 
     pub fn evaluate(&self, phase: PolicyPhase, ctx: &PolicyContext<'_>) -> Vec<PolicyDecision> {
+        self.evaluate_scoped(phase, ctx, None)
+    }
+
+    pub fn evaluate_scoped(
+        &self,
+        phase: PolicyPhase,
+        ctx: &PolicyContext<'_>,
+        scope: Option<&TenantScope>,
+    ) -> Vec<PolicyDecision> {
         match self.policies.read() {
             Ok(policies) => policies
                 .iter()
-                .filter(|policy| policy.phase == phase)
-                .map(|policy| policy.evaluate(ctx))
+                .filter(|policy| policy.applies_to(scope) && policy.policy.phase == phase)
+                .map(|policy| policy.policy.evaluate(ctx))
                 .collect(),
             Err(error) => {
                 tracing::error!("policy store lock poisoned: {error}");
                 Vec::new()
             }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScopedPolicy {
+    pub policy_id: String,
+    pub tenant_id: Option<String>,
+    pub app_id: Option<String>,
+    pub policy: StaticPolicy,
+}
+
+impl ScopedPolicy {
+    pub fn global(policy: StaticPolicy) -> Self {
+        Self {
+            policy_id: format!("policy_{}", uuid::Uuid::new_v4().simple()),
+            tenant_id: None,
+            app_id: None,
+            policy,
+        }
+    }
+
+    fn is_global(&self) -> bool {
+        self.tenant_id.is_none() && self.app_id.is_none()
+    }
+
+    fn validate_scope(&self) -> anyhow::Result<()> {
+        if self.app_id.is_some() && self.tenant_id.is_none() {
+            anyhow::bail!("app-scoped policies must include a tenant");
+        }
+        Ok(())
+    }
+
+    fn applies_to(&self, scope: Option<&TenantScope>) -> bool {
+        if self.is_global() {
+            return true;
+        }
+        scope.is_some_and(|scope| {
+            self.tenant_id.as_deref() == Some(scope.tenant_id.as_str())
+                && self
+                    .app_id
+                    .as_ref()
+                    .is_none_or(|app_id| scope.app_id.as_deref() == Some(app_id))
+        })
+    }
+
+    fn compare(left: &Self, right: &Self) -> std::cmp::Ordering {
+        left.rank()
+            .cmp(&right.rank())
+            .then_with(|| left.policy.name.cmp(&right.policy.name))
+    }
+
+    fn rank(&self) -> u8 {
+        match (&self.tenant_id, &self.app_id) {
+            (None, None) => 0,
+            (Some(_), None) => 1,
+            (Some(_), Some(_)) => 2,
+            (None, Some(_)) => 3,
         }
     }
 }
@@ -646,6 +742,62 @@ mod tests {
         let decisions = engine.evaluate(PolicyPhase::AfterModel, &ctx);
 
         assert!(decisions[0].matched);
+    }
+
+    #[test]
+    fn scoped_policies_resolve_global_then_tenant_then_app() {
+        let make_policy = |name: &str| StaticPolicy {
+            name: name.to_owned(),
+            phase: PolicyPhase::BeforeModel,
+            condition: StaticCondition {
+                always: Some(true),
+                ..StaticCondition::default()
+            },
+            action: deny_action(Some(name)),
+        };
+        let engine = PolicyEngine::from_scoped_policies(vec![
+            ScopedPolicy::global(make_policy("global")),
+            ScopedPolicy {
+                policy_id: "tenant-policy".to_owned(),
+                tenant_id: Some("tenant_1".to_owned()),
+                app_id: None,
+                policy: make_policy("tenant"),
+            },
+            ScopedPolicy {
+                policy_id: "app-policy".to_owned(),
+                tenant_id: Some("tenant_1".to_owned()),
+                app_id: Some("app_1".to_owned()),
+                policy: make_policy("app"),
+            },
+            ScopedPolicy {
+                policy_id: "other-policy".to_owned(),
+                tenant_id: Some("tenant_2".to_owned()),
+                app_id: None,
+                policy: make_policy("other"),
+            },
+        ]);
+        let headers = HeaderMap::new();
+        let request = relay_request();
+        let request_body = json!({});
+        let ctx = PolicyContext {
+            headers: &headers,
+            request: &request,
+            request_body: &request_body,
+            response_body: None,
+        };
+
+        let decisions = engine.evaluate_scoped(
+            PolicyPhase::BeforeModel,
+            &ctx,
+            Some(&TenantScope::app("tenant_1", "app_1")),
+        );
+        assert_eq!(
+            decisions
+                .iter()
+                .map(|decision| decision.policy_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["global", "tenant", "app"]
+        );
     }
 
     fn relay_request() -> RelayRequest {

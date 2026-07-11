@@ -1,5 +1,7 @@
 use std::{env, net::SocketAddr};
 
+use crate::auth::AuthMode;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub host: String,
@@ -8,6 +10,10 @@ pub struct Config {
     pub database_path: String,
     pub lifecycle_store_capacity: usize,
     pub policy_dir: String,
+    pub auth_mode: AuthMode,
+    pub bootstrap_token: Option<String>,
+    pub operator_session_ttl_seconds: i64,
+    pub session_cookie_secure: bool,
 }
 
 impl Config {
@@ -29,6 +35,22 @@ impl Config {
             .unwrap_or(1_000);
         let policy_dir =
             env::var("GARDEN_RELAY_POLICY_DIR").unwrap_or_else(|_| "policies".to_owned());
+        let auth_mode = env::var("GARDEN_RELAY_AUTH_MODE")
+            .unwrap_or_else(|_| "disabled".to_owned())
+            .parse()?;
+        let bootstrap_token = env::var("GARDEN_RELAY_BOOTSTRAP_TOKEN")
+            .ok()
+            .filter(|token| !token.is_empty());
+        let operator_session_ttl_seconds = env::var("GARDEN_RELAY_OPERATOR_SESSION_TTL_SECONDS")
+            .ok()
+            .map(|value| value.parse())
+            .transpose()?
+            .unwrap_or(8 * 60 * 60);
+        let session_cookie_secure = env::var("GARDEN_RELAY_SESSION_COOKIE_SECURE")
+            .ok()
+            .map(|value| value.parse())
+            .transpose()?
+            .unwrap_or(false);
 
         Ok(Self {
             host,
@@ -37,6 +59,10 @@ impl Config {
             database_path,
             lifecycle_store_capacity,
             policy_dir,
+            auth_mode,
+            bootstrap_token,
+            operator_session_ttl_seconds,
+            session_cookie_secure,
         })
     }
 

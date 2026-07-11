@@ -4,8 +4,12 @@ use std::{
 };
 
 use crate::{
-    config::Config, lifecycle::LifecycleSnapshot, policy::PolicyEngine,
-    provider::openai_compatible::OpenAiCompatibleClient, storage::Storage,
+    auth::{AuthMode, AuthService},
+    config::Config,
+    lifecycle::LifecycleSnapshot,
+    policy::PolicyEngine,
+    provider::openai_compatible::OpenAiCompatibleClient,
+    storage::Storage,
 };
 
 #[derive(Clone)]
@@ -14,24 +18,34 @@ pub struct AppState {
     pub lifecycle_store: LifecycleStore,
     pub policy_engine: PolicyEngine,
     pub storage: Storage,
+    pub auth: AuthService,
+    pub auth_mode: AuthMode,
+    pub session_cookie_secure: bool,
 }
 
 impl AppState {
     pub fn from_config(config: &Config) -> anyhow::Result<Self> {
         let storage = Storage::open(&config.database_path)?;
-        let policy_engine = PolicyEngine::from_policies(storage.list_policies()?);
+        let policy_engine = PolicyEngine::from_scoped_policies(storage.list_scoped_policies()?);
 
         for policy in PolicyEngine::from_dir(&config.policy_dir)?.list_policies() {
             storage.save_policy(&policy)?;
             policy_engine.add_policy(policy)?;
         }
 
-        Ok(Self::with_storage(
+        let mut state = Self::with_storage(
             OpenAiCompatibleClient::new(config.openai_base_url.clone()),
             LifecycleStore::new(config.lifecycle_store_capacity),
             policy_engine,
             storage,
-        ))
+        )
+        .with_auth_mode(config.auth_mode);
+        state.auth = state.auth.clone().with_operator_config(
+            config.bootstrap_token.clone(),
+            config.operator_session_ttl_seconds,
+        );
+        state.session_cookie_secure = config.session_cookie_secure;
+        Ok(state)
     }
 
     #[cfg(test)]
@@ -54,12 +68,21 @@ impl AppState {
         policy_engine: PolicyEngine,
         storage: Storage,
     ) -> Self {
+        let auth = AuthService::new(storage.clone());
         Self {
             openai,
             lifecycle_store,
             policy_engine,
             storage,
+            auth,
+            auth_mode: AuthMode::Disabled,
+            session_cookie_secure: false,
         }
+    }
+
+    pub fn with_auth_mode(mut self, auth_mode: AuthMode) -> Self {
+        self.auth_mode = auth_mode;
+        self
     }
 
     pub fn save_lifecycle(&self, snapshot: LifecycleSnapshot) {
