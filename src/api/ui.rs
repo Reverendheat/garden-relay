@@ -328,7 +328,32 @@ const ADMIN_UI: &str = r#"<!doctype html>
     }
 
     .muted { color: var(--muted); }
-    .hidden { display: none; }
+    .hidden { display: none !important; }
+
+    .login-screen {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+
+    .login-panel {
+      width: min(420px, 100%);
+      display: grid;
+      gap: 16px;
+      padding: 20px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+    }
+
+    .management-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .management-section { display: grid; gap: 10px; align-content: start; }
+    .management-section.wide { grid-column: 1 / -1; }
 
     @media (max-width: 860px) {
       main { grid-template-columns: 1fr; }
@@ -344,26 +369,45 @@ const ADMIN_UI: &str = r#"<!doctype html>
       .policy-layout { grid-template-columns: 1fr; }
       .policy-editor-layout { grid-template-columns: 1fr; }
       .playground-layout { grid-template-columns: 1fr; }
+      .management-grid { grid-template-columns: 1fr; }
+      .management-section.wide { grid-column: auto; }
       header { align-items: flex-start; flex-direction: column; }
     }
   </style>
 </head>
 <body>
+  <section class="login-screen hidden" id="login-screen">
+    <form class="login-panel" id="login-form">
+      <h1>Garden Relay</h1>
+      <label><span>Bootstrap token</span><input id="login-token" type="password" autocomplete="current-password"></label>
+      <button class="action primary" type="submit">Sign in</button>
+      <span class="status failed hidden" id="login-error"></span>
+    </form>
+  </section>
+  <div id="admin-shell" class="hidden">
   <header>
     <h1>Garden Relay</h1>
-    <button class="action" id="refresh">Refresh</button>
+    <div class="row-actions">
+      <span class="muted" id="operator-name"></span>
+      <button class="action" id="refresh">Refresh</button>
+      <button class="action" id="logout">Sign out</button>
+    </div>
   </header>
   <main>
     <nav>
       <button data-view="requests" class="active">Requests <span id="request-count">0</span></button>
       <button data-view="policies">Policies <span id="policy-count">0</span></button>
       <button data-view="playground">Playground</button>
+      <button data-view="tenants">Tenants <span id="tenant-count">0</span></button>
     </nav>
     <section class="content">
       <section id="requests-view">
         <div class="toolbar">
           <h2>Recent Requests</h2>
-          <span class="muted" id="requests-updated"></span>
+          <div class="row-actions">
+            <select id="request-tenant"><option value="">All tenants</option></select>
+            <span class="muted" id="requests-updated"></span>
+          </div>
         </div>
         <div class="split">
           <div id="requests-table"></div>
@@ -382,6 +426,11 @@ const ADMIN_UI: &str = r#"<!doctype html>
         </div>
         <div class="policy-layout">
           <div id="policies-table"></div>
+          <div class="field-grid">
+            <label><span>Scope</span><select id="policy-scope"><option value="global">Global</option><option value="tenant">Tenant</option><option value="app">App</option></select></label>
+            <label><span>Tenant</span><select id="policy-tenant"></select></label>
+            <label><span>App</span><select id="policy-app"></select></label>
+          </div>
           <div class="policy-editor-layout">
             <div class="builder" id="policy-builder">
               <div class="builder-section">
@@ -428,6 +477,10 @@ const ADMIN_UI: &str = r#"<!doctype html>
         </div>
         <div class="playground-layout">
           <div class="playground-column">
+            <div class="field-grid">
+              <label><span>Tenant scope</span><select id="playground-tenant"><option value="">No tenant</option></select></label>
+              <label><span>App scope</span><select id="playground-app"><option value="">No app</option></select></label>
+            </div>
             <label><span>Draft policy</span><textarea id="playground-policy" spellcheck="false"></textarea></label>
             <label><span>Sample headers</span><textarea id="playground-headers" spellcheck="false"></textarea></label>
           </div>
@@ -442,17 +495,71 @@ const ADMIN_UI: &str = r#"<!doctype html>
           </div>
         </div>
       </section>
+
+      <section id="tenants-view" class="hidden">
+        <div class="toolbar">
+          <h2>Tenants and Access</h2>
+          <div class="row-actions">
+            <input id="new-tenant-name" type="text" placeholder="Tenant name">
+            <button class="action primary" id="create-tenant">Add Tenant</button>
+          </div>
+        </div>
+        <div class="management-grid">
+          <div class="management-section wide">
+            <label><span>Selected tenant</span><select id="tenant-select"></select></label>
+          </div>
+          <div class="management-section">
+            <div class="toolbar"><h2>Apps</h2></div>
+            <div id="apps-table"></div>
+            <div class="row-actions"><input id="new-app-name" type="text" placeholder="App name"><button class="action" id="create-app">Add App</button></div>
+          </div>
+          <div class="management-section">
+            <div class="toolbar"><h2>Users</h2></div>
+            <div id="users-table"></div>
+            <div class="field-grid">
+              <input id="new-user-external-id" type="text" placeholder="External ID">
+              <input id="new-user-display-name" type="text" placeholder="Display name">
+            </div>
+            <button class="action" id="create-user">Add User</button>
+          </div>
+          <div class="management-section wide">
+            <div class="toolbar"><h2>App Keys</h2></div>
+            <label><span>Selected app</span><select id="app-select"></select></label>
+            <div id="keys-table"></div>
+            <div class="row-actions"><input id="new-key-name" type="text" placeholder="Key name"><button class="action" id="create-key">Create Key</button></div>
+            <pre id="created-key" class="hidden"></pre>
+          </div>
+          <div class="management-section wide">
+            <div class="toolbar"><h2>Operators</h2></div>
+            <div id="operators-table"></div>
+            <div class="row-actions"><input id="new-operator-name" type="text" placeholder="Operator name"><button class="action" id="create-operator">Add Operator</button></div>
+            <pre id="created-operator-key" class="hidden"></pre>
+          </div>
+        </div>
+      </section>
     </section>
   </main>
+  </div>
 
   <script>
     const state = {
       requests: [],
       policies: [],
+      scopedPolicies: [],
       activeView: "requests",
       selectedRequestId: null,
+      requestTenantId: null,
       builderEffects: [],
       selectedEffectIndex: 0,
+      selectedPolicyId: null,
+      session: null,
+      tenants: [],
+      apps: [],
+      users: [],
+      keys: [],
+      operators: [],
+      selectedTenantId: null,
+      selectedAppId: null,
     };
 
     const policyTemplate = {
@@ -510,29 +617,83 @@ const ADMIN_UI: &str = r#"<!doctype html>
     }
 
     async function refresh() {
-      const [requests, policies] = await Promise.all([
-        fetchJson("/v1/requests"),
-        fetchJson("/v1/policies"),
+      const [requests, scopedPolicies, tenants, operators] = await Promise.all([
+        fetchJson(state.requestTenantId ? `/v1/requests?tenant_id=${encodeURIComponent(state.requestTenantId)}` : "/v1/requests"),
+        fetchJson("/v1/scoped-policies"),
+        fetchJson("/v1/tenants"),
+        fetchJson("/v1/operators"),
       ]);
       state.requests = requests;
-      state.policies = policies;
+      state.scopedPolicies = scopedPolicies;
+      state.policies = scopedPolicies.map((record) => record.policy);
+      state.tenants = tenants;
+      state.operators = operators;
       if (!state.requests.some((request) => request.request_id === state.selectedRequestId)) {
         state.selectedRequestId = state.requests[0]?.request_id || null;
       }
+      if (!state.tenants.some((tenant) => tenant.id === state.selectedTenantId)) {
+        state.selectedTenantId = state.tenants[0]?.id || null;
+      }
+      await loadTenantResources();
       render();
     }
 
     function render() {
       $("request-count").textContent = state.requests.length;
       $("policy-count").textContent = state.policies.length;
+      $("tenant-count").textContent = state.tenants.length;
       renderRequests();
       renderPolicies();
+      renderTenants();
+    }
+
+    async function loadTenantResources() {
+      if (!state.selectedTenantId) {
+        state.apps = [];
+        state.users = [];
+        state.keys = [];
+        state.selectedAppId = null;
+        return;
+      }
+      [state.apps, state.users] = await Promise.all([
+        fetchJson(`/v1/tenants/${encodeURIComponent(state.selectedTenantId)}/apps`),
+        fetchJson(`/v1/tenants/${encodeURIComponent(state.selectedTenantId)}/users`),
+      ]);
+      if (!state.apps.some((app) => app.id === state.selectedAppId)) {
+        state.selectedAppId = state.apps[0]?.id || null;
+      }
+      state.keys = state.selectedAppId
+        ? await fetchJson(`/v1/apps/${encodeURIComponent(state.selectedAppId)}/keys`)
+        : [];
+    }
+
+    function renderTenants() {
+      $("tenant-select").innerHTML = state.tenants.map((tenant) => `<option value="${escapeHtml(tenant.id)}">${escapeHtml(tenant.name)}</option>`).join("");
+      $("tenant-select").value = state.selectedTenantId || "";
+      $("app-select").innerHTML = state.apps.map((app) => `<option value="${escapeHtml(app.id)}">${escapeHtml(app.name)}</option>`).join("");
+      $("app-select").value = state.selectedAppId || "";
+      $("apps-table").innerHTML = table(["Name", "Status"], state.apps.map((app) => [escapeHtml(app.name), app.active ? "Active" : "Inactive"]));
+      $("users-table").innerHTML = table(["External ID", "Name"], state.users.map((user) => [escapeHtml(user.external_id), escapeHtml(user.display_name || "")]));
+      $("keys-table").innerHTML = table(["Name", "Prefix", "Status", ""], state.keys.map((key) => [
+        escapeHtml(key.name),
+        `<code>${escapeHtml(key.prefix)}</code>`,
+        key.revoked_at ? "Revoked" : "Active",
+        key.revoked_at ? "" : `<button class="action danger" data-revoke-key="${escapeHtml(key.id)}">Revoke</button>`,
+      ]));
+      $("operators-table").innerHTML = table(["Name", "Status", ""], state.operators.map((operator) => [
+        escapeHtml(operator.name),
+        operator.active ? "Active" : "Inactive",
+        operator.active && operator.id !== state.session?.operator?.id ? `<button class="action danger" data-deactivate-operator="${escapeHtml(operator.id)}">Deactivate</button>` : "",
+      ]));
     }
 
     function initializePlayground() {
       $("playground-policy").value ||= pretty(state.policies[0] || policyTemplate);
       $("playground-headers").value ||= pretty({});
       $("playground-request").value ||= pretty(playgroundRequestTemplate);
+      $("playground-tenant").innerHTML = `<option value="">No tenant</option>${state.tenants.map((tenant) => `<option value="${escapeHtml(tenant.id)}">${escapeHtml(tenant.name)}</option>`).join("")}`;
+      const apps = state.apps.filter((app) => app.tenant_id === $("playground-tenant").value);
+      $("playground-app").innerHTML = `<option value="">No app</option>${apps.map((app) => `<option value="${escapeHtml(app.id)}">${escapeHtml(app.name)}</option>`).join("")}`;
     }
 
     async function runPlayground() {
@@ -550,6 +711,8 @@ const ADMIN_UI: &str = r#"<!doctype html>
             headers: parseRequiredJson("Sample headers", $("playground-headers").value),
             request: parseRequiredJson("Chat completion request", $("playground-request").value),
             response: responseText ? parseRequiredJson("Provider response", responseText) : null,
+            tenant_id: $("playground-tenant").value || null,
+            app_id: $("playground-app").value || null,
           }),
         });
         $("playground-result").textContent = pretty(result.decision);
@@ -591,6 +754,8 @@ const ADMIN_UI: &str = r#"<!doctype html>
     }
 
     function renderRequests() {
+      $("request-tenant").innerHTML = `<option value="">All tenants</option>${state.tenants.map((tenant) => `<option value="${escapeHtml(tenant.id)}">${escapeHtml(tenant.name)}</option>`).join("")}`;
+      $("request-tenant").value = state.requestTenantId || "";
       $("requests-updated").textContent = new Date().toLocaleTimeString();
       if (!state.requests.length) {
         $("requests-table").innerHTML = table(["Request", "Model", "Tenant", "Status"], []);
@@ -619,11 +784,23 @@ const ADMIN_UI: &str = r#"<!doctype html>
     function renderPolicies() {
       $("policy-editor").value ||= pretty(state.policies[0] || policyTemplate);
       fillBuilderFromPolicy(parsePolicyEditor() || state.policies[0] || policyTemplate);
-      $("policies-table").innerHTML = table(["Name", "Phase", "Effect"], state.policies.map((policy) => [
-        `<button class="action" data-policy="${escapeHtml(policy.name)}">${escapeHtml(policy.name)}</button>`,
-        escapeHtml(policy.phase),
-        escapeHtml(effectSummary(policy.then)),
+      $("policies-table").innerHTML = table(["Name", "Scope", "Phase", "Effect"], state.scopedPolicies.map((record) => [
+        `<button class="action" data-policy-id="${escapeHtml(record.policy_id)}">${escapeHtml(record.policy.name)}</button>`,
+        escapeHtml(record.app_id || record.tenant_id || "Global"),
+        escapeHtml(record.policy.phase),
+        escapeHtml(effectSummary(record.policy.then)),
       ]));
+      renderPolicyScopeOptions();
+    }
+
+    function renderPolicyScopeOptions() {
+      const tenantId = $("policy-tenant").value;
+      const appId = $("policy-app").value;
+      $("policy-tenant").innerHTML = state.tenants.map((tenant) => `<option value="${escapeHtml(tenant.id)}">${escapeHtml(tenant.name)}</option>`).join("");
+      $("policy-tenant").value = tenantId || state.selectedTenantId || state.tenants[0]?.id || "";
+      const apps = state.apps.filter((app) => app.tenant_id === $("policy-tenant").value);
+      $("policy-app").innerHTML = apps.map((app) => `<option value="${escapeHtml(app.id)}">${escapeHtml(app.name)}</option>`).join("");
+      $("policy-app").value = appId || apps[0]?.id || "";
     }
 
     function renderBuilderOptions() {
@@ -932,6 +1109,38 @@ const ADMIN_UI: &str = r#"<!doctype html>
         .replaceAll("'", "&#039;");
     }
 
+    async function establishSession() {
+      const response = await fetch("/v1/admin/session");
+      if (!response.ok) {
+        $("login-screen").classList.remove("hidden");
+        $("admin-shell").classList.add("hidden");
+        return false;
+      }
+      state.session = await response.json();
+      $("operator-name").textContent = state.session.operator.name;
+      $("login-screen").classList.add("hidden");
+      $("admin-shell").classList.remove("hidden");
+      await refresh();
+      return true;
+    }
+
+    $("login-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      $("login-error").classList.add("hidden");
+      try {
+        await fetchJson("/v1/admin/login", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ token: $("login-token").value }),
+        });
+        $("login-token").value = "";
+        await establishSession();
+      } catch (error) {
+        $("login-error").textContent = formatApiError(error.message);
+        $("login-error").classList.remove("hidden");
+      }
+    });
+
     document.addEventListener("click", async (event) => {
       const target = event.target.closest("button");
       if (!target) return;
@@ -939,11 +1148,84 @@ const ADMIN_UI: &str = r#"<!doctype html>
       if (target.dataset.view) {
         state.activeView = target.dataset.view;
         document.querySelectorAll("nav button").forEach((button) => button.classList.toggle("active", button.dataset.view === state.activeView));
-        ["requests", "policies", "playground"].forEach((view) => $(`${view}-view`).classList.toggle("hidden", view !== state.activeView));
+        ["requests", "policies", "playground", "tenants"].forEach((view) => $(`${view}-view`).classList.toggle("hidden", view !== state.activeView));
         if (state.activeView === "playground") initializePlayground();
       }
 
       if (target.id === "refresh") {
+        await refresh();
+      }
+
+      if (target.id === "logout") {
+        await fetch("/v1/admin/logout", { method: "POST" });
+        state.session = null;
+        $("admin-shell").classList.add("hidden");
+        $("login-screen").classList.remove("hidden");
+      }
+
+      if (target.id === "create-tenant") {
+        await fetchJson("/v1/tenants", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: $("new-tenant-name").value }),
+        });
+        $("new-tenant-name").value = "";
+        await refresh();
+      }
+
+      if (target.id === "create-app" && state.selectedTenantId) {
+        await fetchJson(`/v1/tenants/${encodeURIComponent(state.selectedTenantId)}/apps`, {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: $("new-app-name").value }),
+        });
+        $("new-app-name").value = "";
+        await refresh();
+      }
+
+      if (target.id === "create-user" && state.selectedTenantId) {
+        await fetchJson(`/v1/tenants/${encodeURIComponent(state.selectedTenantId)}/users`, {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            external_id: $("new-user-external-id").value,
+            display_name: $("new-user-display-name").value || null,
+          }),
+        });
+        $("new-user-external-id").value = "";
+        $("new-user-display-name").value = "";
+        await refresh();
+      }
+
+      if (target.id === "create-key" && state.selectedAppId) {
+        const created = await fetchJson(`/v1/apps/${encodeURIComponent(state.selectedAppId)}/keys`, {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            tenant_id: state.selectedTenantId,
+            name: $("new-key-name").value,
+          }),
+        });
+        $("new-key-name").value = "";
+        $("created-key").textContent = created.secret;
+        $("created-key").classList.remove("hidden");
+        await refresh();
+      }
+
+      if (target.dataset.revokeKey && state.selectedAppId) {
+        await fetch(`/v1/apps/${encodeURIComponent(state.selectedAppId)}/keys/${encodeURIComponent(target.dataset.revokeKey)}`, { method: "DELETE" });
+        await refresh();
+      }
+
+      if (target.id === "create-operator") {
+        const created = await fetchJson("/v1/operators", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: $("new-operator-name").value }),
+        });
+        $("new-operator-name").value = "";
+        $("created-operator-key").textContent = created.secret;
+        $("created-operator-key").classList.remove("hidden");
+        await refresh();
+      }
+
+      if (target.dataset.deactivateOperator) {
+        await fetch(`/v1/operators/${encodeURIComponent(target.dataset.deactivateOperator)}`, { method: "DELETE" });
         await refresh();
       }
 
@@ -954,10 +1236,16 @@ const ADMIN_UI: &str = r#"<!doctype html>
         renderRequests();
       }
 
-      if (target.dataset.policy) {
-        const policy = state.policies.find((item) => item.name === target.dataset.policy);
+      if (target.dataset.policyId) {
+        const record = state.scopedPolicies.find((item) => item.policy_id === target.dataset.policyId);
+        const policy = record?.policy;
         $("policy-editor").value = pretty(policy || policyTemplate);
         fillBuilderFromPolicy(policy || policyTemplate);
+        $("policy-scope").value = record?.app_id ? "app" : record?.tenant_id ? "tenant" : "global";
+        $("policy-tenant").value = record?.tenant_id || "";
+        renderPolicyScopeOptions();
+        $("policy-app").value = record?.app_id || "";
+        state.selectedPolicyId = record?.policy_id || null;
       }
 
       if (target.id === "builder-to-json") {
@@ -994,11 +1282,18 @@ const ADMIN_UI: &str = r#"<!doctype html>
 
       if (target.id === "save-policy") {
         const policy = JSON.parse($("policy-editor").value);
-        await fetchJson("/v1/policies", {
+        const scope = $("policy-scope").value;
+        await fetchJson("/v1/scoped-policies", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(policy),
+          body: JSON.stringify({
+            policy_id: state.selectedPolicyId || null,
+            tenant_id: scope === "global" ? null : $("policy-tenant").value,
+            app_id: scope === "app" ? $("policy-app").value : null,
+            policy,
+          }),
         });
+        state.selectedPolicyId = null;
         await refresh();
       }
 
@@ -1011,7 +1306,30 @@ const ADMIN_UI: &str = r#"<!doctype html>
       }
     });
 
-    document.addEventListener("change", (event) => {
+    document.addEventListener("change", async (event) => {
+      if (event.target.id === "tenant-select") {
+        state.selectedTenantId = event.target.value || null;
+        state.selectedAppId = null;
+        await loadTenantResources();
+        renderTenants();
+      }
+      if (event.target.id === "request-tenant") {
+        state.requestTenantId = event.target.value || null;
+        await refresh();
+      }
+      if (event.target.id === "app-select") {
+        state.selectedAppId = event.target.value || null;
+        state.keys = state.selectedAppId ? await fetchJson(`/v1/apps/${encodeURIComponent(state.selectedAppId)}/keys`) : [];
+        renderTenants();
+      }
+      if (event.target.id === "policy-tenant") {
+        const apps = await fetchJson(`/v1/tenants/${encodeURIComponent(event.target.value)}/apps`);
+        $("policy-app").innerHTML = apps.map((app) => `<option value="${escapeHtml(app.id)}">${escapeHtml(app.name)}</option>`).join("");
+      }
+      if (event.target.id === "playground-tenant") {
+        const apps = event.target.value ? await fetchJson(`/v1/tenants/${encodeURIComponent(event.target.value)}/apps`) : [];
+        $("playground-app").innerHTML = `<option value="">No app</option>${apps.map((app) => `<option value="${escapeHtml(app.id)}">${escapeHtml(app.name)}</option>`).join("")}`;
+      }
       if (event.target.id === "builder-condition") {
         renderConditionFields();
       }
@@ -1033,8 +1351,9 @@ const ADMIN_UI: &str = r#"<!doctype html>
 
     renderBuilderOptions();
     initializePlayground();
-    refresh().catch((error) => {
+    establishSession().catch((error) => {
       $("request-detail").textContent = error.message;
+      $("login-screen").classList.remove("hidden");
     });
   </script>
 </body>
@@ -1050,5 +1369,9 @@ mod tests {
         assert!(ADMIN_UI.contains("id=\"playground-policy\""));
         assert!(ADMIN_UI.contains("id=\"playground-request\""));
         assert!(ADMIN_UI.contains("/v1/playground/evaluate"));
+        assert!(ADMIN_UI.contains("id=\"login-screen\""));
+        assert!(ADMIN_UI.contains("data-view=\"tenants\""));
+        assert!(ADMIN_UI.contains("id=\"created-key\""));
+        assert!(ADMIN_UI.contains("/v1/admin/login"));
     }
 }
