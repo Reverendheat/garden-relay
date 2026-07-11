@@ -18,6 +18,8 @@ just run 18080 /tmp/gardenrelay.db
 
 Use `just run-with-policies` to bootstrap the policies under `examples/policies`, or `just check` to run formatting checks, Clippy, and tests.
 
+The local admin UI login token defaults to `garden-local-admin`. Override it with `GARDEN_RELAY_BOOTSTRAP_TOKEN`.
+
 Without `just`, the equivalent default command is `cargo run`.
 
 ## Local Docker Run
@@ -36,6 +38,7 @@ docker run --rm \
   -e OPENAI_BASE_URL=https://api.openai.com \
   -e GARDEN_RELAY_DATABASE_PATH=/data/gardenrelay.db \
   -e GARDEN_RELAY_LIFECYCLE_STORE_CAPACITY=1000 \
+  -e GARDEN_RELAY_BOOTSTRAP_TOKEN="$GARDEN_RELAY_BOOTSTRAP_TOKEN" \
   -v gardenrelay-data:/data \
   gardenrelay:local
 ```
@@ -89,6 +92,8 @@ http://127.0.0.1:8080/ui
 ```
 
 The UI lists recent requests and active policies from the same local API endpoints used by clients.
+
+Sign in using `GARDEN_RELAY_BOOTSTRAP_TOKEN`. The token creates the first operator on its first successful use and is exchanged for an `HttpOnly`, `SameSite=Strict` server-side session. Set `GARDEN_RELAY_SESSION_COOKIE_SECURE=true` when the UI is served over HTTPS.
 
 The current UI is an MVP bundled into the relay for local iteration. Over time, Garden Relay will grow a separate UI service for richer administration workflows.
 
@@ -156,6 +161,32 @@ Then send a request without `x-garden-tenant`; the relay will deny it before pro
 
 Policies added with `POST /v1/policies` are persisted to SQLite and are loaded again on restart.
 
+## Authentication and Multi-Tenancy
+
+Relay authentication is separate from provider authentication:
+
+```text
+X-Garden-Api-Key: gr_live_...
+Authorization: Bearer <provider-key>
+X-Garden-User: user_123
+```
+
+The relay key determines the tenant and app. Authenticated callers cannot override them with `X-Garden-Tenant` or `X-Garden-App`. If `X-Garden-User` is supplied, it must identify an active user in the authenticated tenant. Provider authorization continues to be forwarded without being persisted.
+
+Configure rollout behavior with `GARDEN_RELAY_AUTH_MODE`:
+
+| Mode | Behavior |
+| --- | --- |
+| `disabled` | Relay keys are not evaluated and legacy Garden identity headers remain available. This is the default migration mode. |
+| `optional` | Requests without a relay key are accepted; supplied keys must be valid. |
+| `required` | Every chat completion requires a valid relay key. |
+
+The **Tenants** admin tab manages tenants, apps, users, relay keys, and operators. Relay and operator secrets are displayed once and stored only as Argon2 password hashes. Revoking a relay key takes effect immediately; creating a replacement before revoking the old key provides rotation without downtime.
+
+Operator management APIs, scoped policies, request timelines, and the playground require an authenticated operator session. Policies execute in deterministic global, tenant, then app order. Request timelines can be filtered by tenant, and playground identity comes from the selected tenant/app scope.
+
+See [docs/authentication.md](docs/authentication.md) for configuration, endpoints, deployment requirements, and migration steps.
+
 ## Human-in-the-loop workflows
 
 Garden Relay does not own human approval or workflow resume loops. Policies can deny, log, disable tools, and mutate request or response content, but application and orchestration layers remain responsible for pausing work, collecting human input, and resuming workflow state.
@@ -166,7 +197,6 @@ Planned areas:
 
 | Area | Goal |
 | --- | --- |
-| Auth and multi-tenancy | Add relay-owned authentication, tenant/app/user management, scoped policy access, and supported admin workflows for managing tenants and operators. |
 | More providers | Add first-class provider adapters beyond OpenAI-compatible chat completions, including Ollama, Anthropic, and Gemini. |
 | PostgreSQL storage | Add a Postgres-backed storage provider for production and shared deployments while keeping SQLite as the simple local default. |
 | Separate UI service | Move beyond the bundled MVP UI toward a dedicated admin service for richer workflows and deployability. |
