@@ -1,6 +1,8 @@
 mod api;
+mod auth;
 mod config;
 mod domain;
+mod identity;
 mod lifecycle;
 mod policy;
 mod provider;

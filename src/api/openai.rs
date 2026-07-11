@@ -12,6 +12,7 @@ use crate::{
         Message, MessageContent, MessageRole, RelayOperation, RelayOptions, RelayRequest,
         RequestMetadata,
     },
+    identity::TenantScope,
     lifecycle::{LifecyclePhase, RequestLifecycle},
     policy::{AugmentMode, PolicyContext, PolicyEffect, PolicyMessage, PolicyPhase},
     provider::openai_compatible::ProviderError,
@@ -382,7 +383,16 @@ fn apply_policy_phase(
         response_body: input.response_body.as_deref(),
     };
 
-    for decision in state.policy_engine.evaluate(input.phase, &ctx) {
+    let scope = input.request.metadata.tenant_id.as_ref().map(|tenant_id| {
+        match &input.request.metadata.app_id {
+            Some(app_id) => TenantScope::app(tenant_id, app_id),
+            None => TenantScope::tenant(tenant_id),
+        }
+    });
+    for decision in state
+        .policy_engine
+        .evaluate_scoped(input.phase, &ctx, scope.as_ref())
+    {
         lifecycle.record_event(
             "policy.evaluated",
             serde_json::json!({

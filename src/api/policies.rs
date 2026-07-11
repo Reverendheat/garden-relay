@@ -1,7 +1,10 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::Serialize;
 
-use crate::{policy::StaticPolicy, state::AppState};
+use crate::{
+    policy::{ScopedPolicy, StaticPolicy},
+    state::AppState,
+};
 
 pub async fn list_policies(State(state): State<AppState>) -> Json<Vec<StaticPolicy>> {
     Json(state.policy_engine.list_policies())
@@ -21,6 +24,52 @@ pub async fn upsert_policy(
         .add_policy(policy.clone())
         .map_err(PolicyApiError::bad_request)?;
 
+    Ok((StatusCode::CREATED, Json(policy)))
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ScopedPolicyInput {
+    pub policy_id: Option<String>,
+    pub tenant_id: Option<String>,
+    pub app_id: Option<String>,
+    pub policy: StaticPolicy,
+}
+
+pub async fn list_scoped_policies(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<ScopedPolicy>>, PolicyApiError> {
+    Ok(Json(
+        state
+            .storage
+            .list_scoped_policies()
+            .map_err(PolicyApiError::internal)?,
+    ))
+}
+
+pub async fn upsert_scoped_policy(
+    State(state): State<AppState>,
+    Json(input): Json<ScopedPolicyInput>,
+) -> Result<(StatusCode, Json<ScopedPolicy>), PolicyApiError> {
+    let policy = ScopedPolicy {
+        policy_id: input
+            .policy_id
+            .unwrap_or_else(|| format!("policy_{}", uuid::Uuid::new_v4().simple())),
+        tenant_id: input.tenant_id,
+        app_id: input.app_id,
+        policy: input.policy,
+    };
+    policy
+        .policy
+        .validate()
+        .map_err(PolicyApiError::bad_request)?;
+    let policy = state
+        .storage
+        .save_scoped_policy(&policy)
+        .map_err(PolicyApiError::bad_request)?;
+    state
+        .policy_engine
+        .add_scoped_policy(policy.clone())
+        .map_err(PolicyApiError::bad_request)?;
     Ok((StatusCode::CREATED, Json(policy)))
 }
 
